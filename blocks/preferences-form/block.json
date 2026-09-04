@@ -1,0 +1,21 @@
+{
+    "$schema": "https://schemas.wp.org/trunk/block.json",
+    "apiVersion": 3,
+    "name": "edh-newsletter/preferences-form",
+    "title": "Newsletter Preferences",
+    "category": "widgets",
+    "icon": "admin-settings",
+    "description": "Lets a subscriber request a link to manage their newsletter preferences. Same output as the [newsletter_preferences] shortcode.",
+    "keywords": ["newsletter", "preferences", "unsubscribe", "email"],
+    "textdomain": "edh-newsletter",
+    "supports": {
+        "html": false,
+        "align": ["wide", "full"],
+        "spacing": { "margin": true }
+    },
+    "attributes": {
+        "title": { "type": "string", "default": "Manage Your Newsletter Preferences" }
+    },
+    "editorScript": "edh-newsletter-blocks",
+    "editorStyle": "edh-newsletter-block-preview"
+}

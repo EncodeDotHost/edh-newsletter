@@ -6,12 +6,13 @@
  * @since 2.0.0
  */
 
+declare(strict_types=1);
+
 defined('ABSPATH') || exit;
 
-// Get status and frequency counts for filters
-$edh_newsletter_admin_interface = new EDH_Newsletter_Admin_Interface();
-$edh_newsletter_status_counts = $edh_newsletter_admin_interface->get_status_counts();
-$edh_newsletter_frequency_counts = $edh_newsletter_admin_interface->get_frequency_counts();
+// This view is included from EDH_Newsletter_Admin_Interface::render_subscribers_page(), so $this is that instance.
+$edh_newsletter_status_counts = $this->get_status_counts();
+$edh_newsletter_frequency_counts = $this->get_frequency_counts();
 ?>
 
 <div class="wrap">
@@ -91,9 +92,10 @@ $edh_newsletter_frequency_counts = $edh_newsletter_admin_interface->get_frequenc
     
     <!-- Subscribers Table -->
     <form method="post" class="newsletter-bulk-actions">
+        <?php wp_nonce_field('newsletter_bulk_action', 'newsletter_bulk_nonce'); ?>
         <div class="tablenav top">
             <div class="alignleft actions bulkactions">
-                <select name="action">
+                <select name="bulk_action">
                     <option value="-1"><?php esc_html_e('Bulk Actions', 'edh-newsletter'); ?></option>
                     <option value="delete"><?php esc_html_e('Delete', 'edh-newsletter'); ?></option>
                     <option value="unsubscribe"><?php esc_html_e('Unsubscribe', 'edh-newsletter'); ?></option>
@@ -102,7 +104,7 @@ $edh_newsletter_frequency_counts = $edh_newsletter_admin_interface->get_frequenc
                 <button type="submit" class="button action"><?php esc_html_e('Apply', 'edh-newsletter'); ?></button>
             </div>
             
-            <?php $edh_newsletter_admin_interface->render_pagination($total_subscribers, $per_page, $page); ?>
+            <?php $this->render_pagination($total_subscribers, $per_page, $page); ?>
         </div>
         
         <table class="wp-list-table widefat fixed striped newsletter-subscribers-table">
@@ -221,7 +223,7 @@ $edh_newsletter_frequency_counts = $edh_newsletter_admin_interface->get_frequenc
         </table>
         
         <div class="tablenav bottom">
-            <?php $edh_newsletter_admin_interface->render_pagination($total_subscribers, $per_page, $page); ?>
+            <?php $this->render_pagination($total_subscribers, $per_page, $page); ?>
         </div>
     </form>
     

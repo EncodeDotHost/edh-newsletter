@@ -214,3 +214,54 @@ load_plugin_textdomain('newsletter', false, dirname(plugin_basename($this->plugi
 
 The plugin has been updated to address all critical security vulnerabilities and WordPress coding standards issues. The main security concerns (SQL injection and XSS) have been fixed. The plugin is now compliant with WordPress coding standards and security best practices. All text domains have been standardized to match the plugin header.
 
+
+---
+
+# Second Review (2026-09-04)
+
+A second pass combined a multi-angle code review (correctness, reuse, simplification, efficiency, conventions) with a security review. All findings below were fixed in the same change set.
+
+## Security
+
+| # | Finding | Fix |
+|---|---------|-----|
+| S1 | **Double opt-in bypass.** `?newsletter_action=confirm&token=` (empty) matched any pending row whose token had been blanked by the daily cleanup and confirmed it. | Empty/short tokens are rejected in `handle_confirmation()`, `get_subscriber_by_token()` and `confirm_subscription()`. The cleanup now deletes expired pending rows instead of blanking their token. |
+| S2 | Preferences form accepted `action=resume` for any status, and action tokens never expire, so a stale link could re-activate an unsubscribed or never-confirmed address. | Preference actions require status `subscribed` or `paused`; `pause` requires `subscribed`, `resume` requires `paused`. The lookup form only emails links for active subscriptions and always shows the same neutral message. |
+| S3 | `$wpdb->last_error` was returned to anonymous visitors. | Logged when `WP_DEBUG_LOG` is on; visitors get a generic message. |
+
+## Correctness
+
+| # | Finding | Fix |
+|---|---------|-----|
+| C1 | `handle_public_actions` was added to `init@10` from inside an `init@10` callback, so confirmation, unsubscribe and preferences links never dispatched. `init_plugin` had the same problem on `plugins_loaded`. | Dispatcher moved to `template_redirect`; `init_plugin` to `init@5`. Rule documented in CLAUDE.md. |
+| C2 | `unsubscribe()` called `json_decode()` on preferences already decoded to an array (TypeError). | Uses the array directly. |
+| C3 | String option values passed to `int` parameters under `strict_types` (fatal on settings save and re-activation). | Scheduler casts every option with `(int)`. |
+| C4 | Frontend JS disabled submit buttons during `submit`, so the clicked button's `action` value never reached the server (unsubscribe/pause/update/resume were no-ops). | Buttons are disabled on `setTimeout(0)`. |
+| C5 | Admin asset/notice gating matched `edh-newsletter` against hook suffixes that are `newsletter_page_*`, so admin JS/CSS never loaded on submenu pages (settings tabs unreachable, test email form broken). | Hook suffixes returned by `add_menu_page`/`add_submenu_page` are collected and matched exactly. |
+| C6 | `activate()` stamped the DB version before the v1.x migration could run; the legacy `wan_send_weekly_digest` event was never cleared. | `activate()` runs `maybe_upgrade_database()` first; the migration and `deactivate()` unschedule the legacy hook; `upgrade_database()` re-runs `dbDelta`. |
+| C7 | Re-signup kept the old `created_at`, so the new confirmation token was removed by the next daily cleanup. | Re-signup resets `created_at`. |
+| C8 | Next-run times mixed site-local wall clock with UTC `strtotime`; the monthly recurrence was a fixed 30 days. | Scheduler rewritten around `DateTimeImmutable` in `wp_timezone()`, single events re-armed after each send, day-of-month clamped to month length. |
+| C9 | Reschedule only listened on `update_option_*`, which never fires for a first save. | Listens on `added_option` and `updated_option`; `ensure_scheduled()` recreates missing events on every request. |
+| C10 | "All" status filter listed only subscribed rows against a count of every row. | `status => 'all'` is passed explicitly and handled by the shared WHERE builder. |
+| C11 | Add, Export, Bulk, Resubscribe and Run Cleanup UI had no handlers. | Implemented (`handle_subscriber_actions()`, `maybe_export_subscribers()` on `admin_init`, `wp_ajax_newsletter_run_cleanup`). |
+| C12 | A second cleanup handler in Subscriber Manager used an equality match and deleted nothing. | Removed; Privacy Manager owns retention. |
+| C13 | `wp_mail_content_type` was forced to `text/html` site-wide. | Removed; the plugin sets `Content-Type` per message. |
+| C14 | `update_delivery_stats()` was never called. | Called once per batch with counts. |
+
+## Efficiency, reuse, simplification
+
+- Digest sends are batched (`edh_newsletter_send_digest_batch`, default 100 per batch, filter `edh_newsletter_digest_batch_size`); the body is rendered once per run and the two footer URLs are substituted per recipient; engagement dates are updated with one `UPDATE ... IN (...)` per batch.
+- Template Manager no longer keeps heredoc copies or hand-built fallbacks, and no longer writes into the plugin directory on every request (about 350 lines removed). Child themes are checked before parent themes.
+- `build_where()` is the single WHERE builder for `get_subscribers()` and `get_subscriber_count()`; admin counts come from one `GROUP BY` query.
+- The subscribers view uses `$this` instead of constructing a second `EDH_Newsletter_Admin_Interface`.
+- The preferences lookup uses `Email_Sender::generate_preferences_url()` instead of an inline copy of the token hash.
+- Public CSS/JS (and jQuery) load only on pages that render a newsletter form. The `DOMNodeInserted` listener and the dead `.newsletter-ajax-form` path were removed.
+- `token` column is now indexed (`DB_VERSION` 2.1).
+- Every admin view and email template starts with `declare(strict_types=1)` and the `ABSPATH` guard.
+
+## Behaviour changes to be aware of
+
+- Pending subscribers who do not confirm within `newsletter_token_expiry_hours` (default 24) are now **deleted**, not kept with a blank token.
+- `edh_newsletter_digest_sent` now receives `($frequency, $sent, $post_count, $failed)`.
+- Digest templates receive an empty `$subscriber` unless the `edh_newsletter_render_per_recipient` filter returns `true`.
+- Weekly and monthly digests are single cron events that re-arm themselves; the custom `weekly`/`monthly` cron intervals are no longer registered.

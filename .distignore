@@ -1,0 +1,8 @@
+# Excluded from distribution builds (wp dist-archive, Plugin Check)
+.git
+.gitignore
+.distignore
+.claude
+CLAUDE.md
+CODE_REVIEW.md
+edh-newsletter-*.md

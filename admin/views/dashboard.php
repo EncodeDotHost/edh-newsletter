@@ -6,6 +6,8 @@
  * @since 2.0.0
  */
 
+declare(strict_types=1);
+
 defined('ABSPATH') || exit;
 ?>
 
@@ -43,7 +45,7 @@ defined('ABSPATH') || exit;
             <!-- Test Email -->
             <div class="newsletter-test-email">
                 <h4><?php esc_html_e('Send Test Email', 'edh-newsletter'); ?></h4>
-                <form class="newsletter-test-email-form">
+                <form class="newsletter-test-email-form" method="post" action="#">
                     <div class="newsletter-test-form">
                         <input type="email" name="test_email" placeholder="<?php esc_attr_e('Enter email address', 'edh-newsletter'); ?>" required>
                         <select name="test_frequency">
@@ -83,7 +85,7 @@ defined('ABSPATH') || exit;
                     <span class="newsletter-schedule-enabled"><?php esc_html_e('Enabled', 'edh-newsletter'); ?></span>
                     <div><?php
                         // translators: %1$s: Formatted date and time of next scheduled run
-                        printf(esc_html__('Next run: %1$s', 'edh-newsletter'), esc_html(date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $schedule_status['weekly']['next_run'])));
+                        printf(esc_html__('Next run: %1$s', 'edh-newsletter'), esc_html($schedule_status['weekly']['next_run_formatted']));
                     ?></div>
                 <?php else: ?>
                     <span class="newsletter-schedule-disabled"><?php esc_html_e('Not Scheduled', 'edh-newsletter'); ?></span>
@@ -98,7 +100,7 @@ defined('ABSPATH') || exit;
                     <span class="newsletter-schedule-enabled"><?php esc_html_e('Enabled', 'edh-newsletter'); ?></span>
                     <div><?php
                         // translators: %1$s: Formatted date and time of next scheduled run
-                        printf(esc_html__('Next run: %1$s', 'edh-newsletter'), esc_html(date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $schedule_status['monthly']['next_run'])));
+                        printf(esc_html__('Next run: %1$s', 'edh-newsletter'), esc_html($schedule_status['monthly']['next_run_formatted']));
                     ?></div>
                 <?php else: ?>
                     <span class="newsletter-schedule-disabled"><?php esc_html_e('Not Scheduled', 'edh-newsletter'); ?></span>

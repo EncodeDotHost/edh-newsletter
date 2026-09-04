@@ -13,8 +13,14 @@ defined('ABSPATH') || exit;
 /**
  * Newsletter Subscriber Manager
  * 
- * Handles all subscriber CRUD operations and data management
+ * Handles all subscriber CRUD operations and data management.
+ *
+ * This class is the only data-access layer for the plugin's custom table, so
+ * direct $wpdb calls are expected here. Every query goes through prepare();
+ * the interpolated fragments are the esc_sql()'d table name and clauses built
+ * exclusively from whitelisted values in build_where() / get_subscribers().
  */
+// phpcs:disable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, PluginCheck.Security.DirectDB.UnescapedDBParameter
 class EDH_Newsletter_Subscriber_Manager {
     
     /**
@@ -46,7 +52,7 @@ class EDH_Newsletter_Subscriber_Manager {
      * Initialize hooks
      */
     private function init_hooks() {
-        add_action('edh_newsletter_cleanup_expired_data', [$this, 'cleanup_expired_subscribers']);
+        // Retention cleanup is owned by EDH_Newsletter_Privacy_Manager.
     }
     
     /**
@@ -71,10 +77,18 @@ class EDH_Newsletter_Subscriber_Manager {
         
         // Generate confirmation token
         $subscriber_data['token'] = $this->generate_token($subscriber_data['email']);
-        $subscriber_data['privacy_consent_date'] = current_time('mysql');
-        $subscriber_data['consent_version'] = get_option('newsletter_consent_version', '1.0');
+        
+        if (!empty($data['privacy_consent'])) {
+            $subscriber_data['privacy_consent_date'] = current_time('mysql');
+            $subscriber_data['consent_version'] = get_option('newsletter_consent_version', '1.0');
+        }
         
         if ($existing) {
+            // Re-signup: restart the confirmation window, otherwise the daily
+            // cleanup (which keys on created_at) removes the row immediately.
+            $subscriber_data['created_at'] = current_time('mysql');
+            $subscriber_data['last_engagement_date'] = null;
+            
             // Update existing subscriber
             $result = $wpdb->update(
                 $this->table_name,
@@ -95,7 +109,7 @@ class EDH_Newsletter_Subscriber_Manager {
         }
         
         if ($result === false) {
-            return $this->error_response('Database error: ' . $wpdb->last_error);
+            return $this->database_error();
         }
         
         $subscriber = $this->get_subscriber($subscriber_id);
@@ -142,6 +156,11 @@ class EDH_Newsletter_Subscriber_Manager {
     public function get_subscriber_by_token(string $token): ?array {
         global $wpdb;
         
+        // Never match on an empty token: rows can legitimately carry token = ''.
+        if ($token === '') {
+            return null;
+        }
+        
         $table_name = esc_sql($this->table_name);
         $subscriber = $wpdb->get_row(
             $wpdb->prepare("SELECT * FROM `{$table_name}` WHERE token = %s", $token),
@@ -178,7 +197,7 @@ class EDH_Newsletter_Subscriber_Manager {
         );
         
         if ($result === false) {
-            return $this->error_response('Database error: ' . $wpdb->last_error);
+            return $this->database_error();
         }
         
         $updated_subscriber = $this->get_subscriber($id);
@@ -193,6 +212,10 @@ class EDH_Newsletter_Subscriber_Manager {
      * Confirm subscriber subscription
      */
     public function confirm_subscription(string $token): array {
+        if (strlen($token) < 32) {
+            return $this->error_response('Invalid or expired confirmation token');
+        }
+        
         $subscriber = $this->get_subscriber_by_token($token);
         
         if (!$subscriber || $subscriber['status'] !== 'pending') {
@@ -222,7 +245,7 @@ class EDH_Newsletter_Subscriber_Manager {
             return $this->error_response('Subscriber not found');
         }
         
-        $preferences = $subscriber['preferences'] ? json_decode($subscriber['preferences'], true) : [];
+        $preferences = is_array($subscriber['preferences']) ? $subscriber['preferences'] : [];
         $preferences['unsubscribe_reason'] = $reason;
         $preferences['unsubscribed_at'] = current_time('mysql');
         
@@ -256,6 +279,23 @@ class EDH_Newsletter_Subscriber_Manager {
     }
     
     /**
+     * Resubscribe an unsubscribed, paused, or pending subscriber (admin action, no confirmation)
+     */
+    public function resubscribe(int $id): array {
+        $subscriber = $this->get_subscriber($id);
+        
+        if (!$subscriber) {
+            return $this->error_response('Subscriber not found');
+        }
+        
+        if ($subscriber['status'] === 'subscribed') {
+            return $this->error_response('Subscriber is already active');
+        }
+        
+        return $this->update_subscriber($id, ['status' => 'subscribed', 'token' => '']);
+    }
+    
+    /**
      * Delete subscriber (GDPR compliance)
      */
     public function delete_subscriber(int $id): array {
@@ -273,12 +313,64 @@ class EDH_Newsletter_Subscriber_Manager {
         );
         
         if ($result === false) {
-            return $this->error_response('Database error: ' . $wpdb->last_error);
+            return $this->database_error();
         }
         
         do_action('edh_newsletter_subscriber_deleted', $subscriber);
         
         return $this->success_response(['deleted' => true]);
+    }
+    
+    /**
+     * Build the WHERE clause shared by get_subscribers() and get_subscriber_count().
+     *
+     * Supported args:
+     *  - status:    string, array of strings, or 'all' (no status filter)
+     *  - frequency: 'weekly' | 'monthly'
+     *  - after_id:  int, only rows with id > after_id (cursor for batching)
+     *
+     * @return array{0: string, 1: array} SQL fragment (always contains at least one placeholder) and values
+     */
+    private function build_where(array $args): array {
+        $where_conditions = [];
+        $where_values = [];
+        $status_map = array_combine(self::VALID_STATUSES, self::VALID_STATUSES);
+        
+        // Status filter - use map lookup to avoid taint
+        if (!empty($args['status']) && $args['status'] !== 'all') {
+            $status_list = [];
+            foreach ((array) $args['status'] as $status) {
+                if (is_string($status) && isset($status_map[$status])) {
+                    $status_list[] = $status_map[$status];
+                }
+            }
+            
+            if (!empty($status_list)) {
+                $placeholders = implode(',', array_fill(0, count($status_list), '%s'));
+                $where_conditions[] = "status IN ({$placeholders})";
+                $where_values = array_merge($where_values, $status_list);
+            }
+        }
+        
+        // Frequency filter - use map lookup to break taint chain
+        $frequency_map = array_combine(self::VALID_FREQUENCIES, self::VALID_FREQUENCIES);
+        if (isset($args['frequency']) && is_string($args['frequency']) && isset($frequency_map[$args['frequency']])) {
+            $where_conditions[] = "digest_frequency = %s";
+            $where_values[] = $frequency_map[$args['frequency']];
+        }
+        
+        // Cursor for batched iteration
+        if (!empty($args['after_id'])) {
+            $where_conditions[] = "id > %d";
+            $where_values[] = absint($args['after_id']);
+        }
+        
+        if (empty($where_conditions)) {
+            // Harmless clause so prepare() always receives a placeholder
+            return ['WHERE 1 = %d', [1]];
+        }
+        
+        return ['WHERE ' . implode(' AND ', $where_conditions), $where_values];
     }
     
     /**
@@ -290,6 +382,7 @@ class EDH_Newsletter_Subscriber_Manager {
         $defaults = [
             'status' => 'subscribed',
             'frequency' => null,
+            'after_id' => 0,
             'limit' => -1,
             'offset' => 0,
             'orderby' => 'created_at',
@@ -299,71 +392,22 @@ class EDH_Newsletter_Subscriber_Manager {
         $args = wp_parse_args($args, $defaults);
         
         // Sanitize and validate arguments
-        $args['limit'] = absint($args['limit']);
+        $args['limit'] = (int) $args['limit'];
         $args['offset'] = absint($args['offset']);
         
         // Validate and escape orderby column - whitelist allowed columns
         $allowed_orderby = ['id', 'email', 'status', 'digest_frequency', 'created_at', 'updated_at', 'last_engagement_date'];
-        $orderby_column_raw = isset($args['orderby']) ? sanitize_key($args['orderby']) : 'created_at';
+        $orderby_column_raw = sanitize_key((string) $args['orderby']);
         $orderby_column = in_array($orderby_column_raw, $allowed_orderby, true) ? $orderby_column_raw : 'created_at';
         $orderby_column_escaped = esc_sql($orderby_column);
         
         // Validate and escape order direction
-        $order_direction_raw = isset($args['order']) ? strtoupper(sanitize_key($args['order'])) : 'DESC';
-        $order_direction = ($order_direction_raw === 'ASC') ? 'ASC' : 'DESC';
-        $order_direction_escaped = esc_sql($order_direction);
+        $order_direction = strtoupper(sanitize_key((string) $args['order'])) === 'ASC' ? 'ASC' : 'DESC';
         
-        $where_conditions = [];
-        $where_values = [];
-        $status_map = array_combine(self::VALID_STATUSES, self::VALID_STATUSES);
+        [$where_clause, $where_values] = $this->build_where($args);
         
-        // Status filter - use map lookup to avoid taint
-        if (!empty($args['status'])) {
-            $status_list = [];
-            if (is_array($args['status'])) {
-                foreach ($args['status'] as $status) {
-                    if (is_string($status) && isset($status_map[$status])) {
-                        $status_list[] = $status_map[$status];
-                    }
-                }
-            } elseif (is_string($args['status']) && isset($status_map[$args['status']])) {
-                $status_list[] = $status_map[$args['status']];
-            }
-            
-            if (!empty($status_list)) {
-                if (count($status_list) > 1) {
-                    $placeholders = implode(',', array_fill(0, count($status_list), '%s'));
-                    $where_conditions[] = "status IN ($placeholders)";
-                    $where_values = array_merge($where_values, $status_list);
-                } else {
-                    $where_conditions[] = "status = %s";
-                    $where_values[] = $status_list[0];
-                }
-            }
-        }
+        $order_clause = "ORDER BY {$orderby_column_escaped} {$order_direction}";
         
-        // Frequency filter - use map lookup to break taint chain
-        $frequency_map = [
-            'weekly' => 'weekly',
-            'monthly' => 'monthly',
-        ];
-        
-        if (isset($args['frequency']) && is_string($args['frequency']) && isset($frequency_map[$args['frequency']])) {
-            $where_conditions[] = "digest_frequency = %s";
-            // Use trusted value from map, not user input
-            $where_values[] = $frequency_map[$args['frequency']];
-        }
-        
-        // Build WHERE clause - all conditions use placeholders, safe to concatenate
-        $where_clause = '';
-        if (!empty($where_conditions)) {
-            $where_clause = 'WHERE ' . implode(' AND ', $where_conditions);
-        }
-        
-        // Build ORDER BY clause - use escaped whitelisted column and validated direction
-        $order_clause = "ORDER BY {$orderby_column_escaped} {$order_direction_escaped}";
-        
-        // Build LIMIT clause
         $limit_values = [];
         $limit_clause = '';
         if ($args['limit'] > 0) {
@@ -371,16 +415,9 @@ class EDH_Newsletter_Subscriber_Manager {
             $limit_values = [$args['limit'], $args['offset']];
         }
         
-        // Build query with placeholders - always include at least one placeholder
         $table_name = esc_sql($this->table_name);
-        if (empty($where_clause)) {
-            // Add a harmless WHERE clause to ensure we always have a placeholder
-            $where_clause = 'WHERE 1 = %d';
-            $where_values = [1];
-        }
-        
-        // Prepare query with all values and execute
         $all_values = array_merge($where_values, $limit_values);
+        
         $subscribers = $wpdb->get_results(
             $wpdb->prepare(
                 "SELECT * FROM `{$table_name}` {$where_clause} {$order_clause} {$limit_clause}",
@@ -389,65 +426,16 @@ class EDH_Newsletter_Subscriber_Manager {
             ARRAY_A
         );
         
-        return array_map([$this, 'format_subscriber'], $subscribers);
+        return array_map([$this, 'format_subscriber'], $subscribers ?: []);
     }
     
     /**
-     * Get subscriber count by criteria
+     * Get subscriber count by criteria (no status filter unless one is given)
      */
     public function get_subscriber_count(array $args = []): int {
         global $wpdb;
         
-        $where_conditions = [];
-        $where_values = [];
-        $status_map = array_combine(self::VALID_STATUSES, self::VALID_STATUSES);
-        
-        if (!empty($args['status'])) {
-            $status_list = [];
-            if (is_array($args['status'])) {
-                foreach ($args['status'] as $status) {
-                    if (is_string($status) && isset($status_map[$status])) {
-                        $status_list[] = $status_map[$status];
-                    }
-                }
-            } elseif (is_string($args['status']) && isset($status_map[$args['status']])) {
-                $status_list[] = $status_map[$args['status']];
-            }
-            
-            if (!empty($status_list)) {
-                if (count($status_list) > 1) {
-                    $placeholders = implode(',', array_fill(0, count($status_list), '%s'));
-                    $where_conditions[] = "status IN ($placeholders)";
-                    $where_values = array_merge($where_values, $status_list);
-                } else {
-                    $where_conditions[] = "status = %s";
-                    $where_values[] = $status_list[0];
-                }
-            }
-        }
-        
-        // Frequency filter - use map lookup to break taint chain
-        $frequency_map = [
-            'weekly' => 'weekly',
-            'monthly' => 'monthly',
-        ];
-        
-        if (isset($args['frequency']) && is_string($args['frequency']) && isset($frequency_map[$args['frequency']])) {
-            $where_conditions[] = "digest_frequency = %s";
-            // Use trusted value from map, not user input
-            $where_values[] = $frequency_map[$args['frequency']];
-        }
-        
-        $where_clause = '';
-        if (!empty($where_conditions)) {
-            $where_clause = 'WHERE ' . implode(' AND ', $where_conditions);
-        } else {
-            // Add a harmless WHERE clause to ensure we always have a placeholder
-            $where_clause = 'WHERE 1 = %d';
-            $where_values = [1];
-        }
-        
-        // Build and prepare query
+        [$where_clause, $where_values] = $this->build_where($args);
         $table_name = esc_sql($this->table_name);
         
         return (int) $wpdb->get_var(
@@ -456,6 +444,33 @@ class EDH_Newsletter_Subscriber_Manager {
                 $where_values
             )
         );
+    }
+    
+    /**
+     * Count subscribers grouped by status and frequency in a single query.
+     *
+     * @return array<string, array<string, int>> [status => [frequency => count]]
+     */
+    public function get_status_frequency_counts(): array {
+        global $wpdb;
+        
+        $table_name = esc_sql($this->table_name);
+        
+        $rows = $wpdb->get_results(
+            "SELECT status, digest_frequency, COUNT(*) AS n FROM `{$table_name}` GROUP BY status, digest_frequency",
+            ARRAY_A
+        );
+        
+        $counts = [];
+        foreach (self::VALID_STATUSES as $status) {
+            $counts[$status] = array_fill_keys(self::VALID_FREQUENCIES, 0);
+        }
+        
+        foreach ($rows ?: [] as $row) {
+            $counts[$row['status']][$row['digest_frequency']] = (int) $row['n'];
+        }
+        
+        return $counts;
     }
     
     /**
@@ -474,27 +489,23 @@ class EDH_Newsletter_Subscriber_Manager {
     }
     
     /**
-     * Cleanup expired subscribers based on data retention policy
+     * Update engagement date for many subscribers in one query
      */
-    public function cleanup_expired_subscribers(): void {
+    public function update_engagement_bulk(array $ids): void {
         global $wpdb;
         
-        $retention_days = get_option('newsletter_data_retention_days', 365);
-        $cutoff_date = gmdate('Y-m-d H:i:s', strtotime("-{$retention_days} days"));
-        
-        // Delete unsubscribed subscribers older than retention period
-        $deleted = $wpdb->delete(
-            $this->table_name,
-            [
-                'status' => 'unsubscribed',
-                'updated_at' => $cutoff_date
-            ],
-            ['%s', '%s']
-        );
-        
-        if ($deleted > 0) {
-            do_action('edh_newsletter_expired_subscribers_cleaned', $deleted);
+        $ids = array_values(array_filter(array_map('absint', $ids)));
+        if (empty($ids)) {
+            return;
         }
+        
+        $table_name = esc_sql($this->table_name);
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        
+        $wpdb->query($wpdb->prepare(
+            "UPDATE `{$table_name}` SET last_engagement_date = %s WHERE id IN ({$placeholders})",
+            array_merge([current_time('mysql')], $ids)
+        ));
     }
     
     /**
@@ -578,9 +589,16 @@ class EDH_Newsletter_Subscriber_Manager {
             $prepared['consent_version'] = sanitize_text_field($data['consent_version']);
         }
         
-        // Last engagement date
-        if (isset($data['last_engagement_date'])) {
-            $prepared['last_engagement_date'] = sanitize_text_field($data['last_engagement_date']);
+        // Last engagement date (null clears it)
+        if (array_key_exists('last_engagement_date', $data)) {
+            $prepared['last_engagement_date'] = $data['last_engagement_date'] === null
+                ? null
+                : sanitize_text_field($data['last_engagement_date']);
+        }
+        
+        // Created date (only set explicitly on re-signup)
+        if (isset($data['created_at'])) {
+            $prepared['created_at'] = sanitize_text_field($data['created_at']);
         }
         
         return $prepared;
@@ -641,6 +659,20 @@ class EDH_Newsletter_Subscriber_Manager {
     }
     
     /**
+     * Log a database error and return a generic error response
+     */
+    private function database_error(): array {
+        global $wpdb;
+        
+        if (defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+            error_log('Newsletter: database error: ' . $wpdb->last_error);
+        }
+        
+        return $this->error_response('A database error occurred. Please try again later.');
+    }
+    
+    /**
      * Create error response
      */
     private function error_response(string $message): array {
@@ -650,3 +682,4 @@ class EDH_Newsletter_Subscriber_Manager {
         ];
     }
 }
+// phpcs:enable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, PluginCheck.Security.DirectDB.UnescapedDBParameter

@@ -29,12 +29,14 @@
                 return;
             }
             
-            // Show loading state
+            // Show loading state. The buttons are disabled on the next tick:
+            // the browser builds the form data after this event fires and
+            // skips disabled controls, so disabling them now would drop the
+            // clicked button's name/value (e.g. action=unsubscribe).
             $form.addClass('loading');
-            $button.prop('disabled', true);
-            
-            // Form will submit normally, but we show loading state
-            // The loading state will be cleared when the page reloads
+            setTimeout(function() {
+                $button.prop('disabled', true);
+            }, 0);
         });
     }
     
@@ -137,8 +139,9 @@
     function showFieldError($field, message) {
         clearFieldError($field);
         
-        var $error = $('<div class="newsletter-field-error">' + message + '</div>');
-        $field.addClass('newsletter-field-invalid');
+        var errorId = 'newsletter-error-' + Math.random().toString(36).substr(2, 9);
+        var $error = $('<div class="newsletter-field-error" role="alert"></div>').attr('id', errorId).text(message);
+        $field.addClass('newsletter-field-invalid').attr('aria-describedby', errorId);
         $field.after($error);
         
         // Focus on first error field
@@ -151,7 +154,7 @@
      * Clear field error
      */
     function clearFieldError($field) {
-        $field.removeClass('newsletter-field-invalid');
+        $field.removeClass('newsletter-field-invalid').removeAttr('aria-describedby');
         $field.siblings('.newsletter-field-error').remove();
     }
     
@@ -162,130 +165,6 @@
         var re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         return re.test(email);
     }
-    
-    /**
-     * Show notification message
-     */
-    function showNotification(message, type) {
-        type = type || 'info';
-        
-        var $notification = $('<div class="newsletter-notification newsletter-notification-' + type + '">' + 
-                            '<span class="newsletter-notification-message">' + message + '</span>' +
-                            '<button class="newsletter-notification-close">&times;</button>' +
-                            '</div>');
-        
-        $('body').append($notification);
-        
-        // Position notification
-        $notification.css({
-            position: 'fixed',
-            top: '20px',
-            right: '20px',
-            zIndex: 9999,
-            padding: '15px 20px',
-            borderRadius: '4px',
-            maxWidth: '300px',
-            boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
-        });
-        
-        // Style based on type
-        switch (type) {
-            case 'success':
-                $notification.css({
-                    backgroundColor: '#d4edda',
-                    border: '1px solid #c3e6cb',
-                    color: '#155724'
-                });
-                break;
-            case 'error':
-                $notification.css({
-                    backgroundColor: '#f8d7da',
-                    border: '1px solid #f5c6cb',
-                    color: '#721c24'
-                });
-                break;
-            case 'warning':
-                $notification.css({
-                    backgroundColor: '#fff3cd',
-                    border: '1px solid #ffeaa7',
-                    color: '#856404'
-                });
-                break;
-            default:
-                $notification.css({
-                    backgroundColor: '#d1ecf1',
-                    border: '1px solid #bee5eb',
-                    color: '#0c5460'
-                });
-        }
-        
-        // Auto-hide after 5 seconds
-        setTimeout(function() {
-            $notification.fadeOut(function() {
-                $notification.remove();
-            });
-        }, 5000);
-        
-        // Handle close button
-        $notification.find('.newsletter-notification-close').on('click', function() {
-            $notification.fadeOut(function() {
-                $notification.remove();
-            });
-        });
-        
-        // Animate in
-        $notification.hide().fadeIn();
-    }
-    
-    /**
-     * Handle AJAX form submissions (if needed)
-     */
-    function initAjaxForms() {
-        $('.newsletter-ajax-form').on('submit', function(e) {
-            e.preventDefault();
-            
-            var $form = $(this);
-            var $button = $form.find('button[type="submit"]');
-            var formData = new FormData(this);
-            
-            if (!validateForm($form)) {
-                return;
-            }
-            
-            $form.addClass('loading');
-            $button.prop('disabled', true);
-            
-            $.ajax({
-                url: $form.attr('action') || window.location.href,
-                type: 'POST',
-                data: formData,
-                processData: false,
-                contentType: false,
-                success: function(response) {
-                    if (response.success) {
-                        showNotification(response.message || 'Success!', 'success');
-                        if (response.redirect) {
-                            window.location.href = response.redirect;
-                        } else {
-                            $form[0].reset();
-                        }
-                    } else {
-                        showNotification(response.message || 'An error occurred.', 'error');
-                    }
-                },
-                error: function() {
-                    showNotification('A network error occurred. Please try again.', 'error');
-                },
-                complete: function() {
-                    $form.removeClass('loading');
-                    $button.prop('disabled', false);
-                }
-            });
-        });
-    }
-    
-    // Initialize AJAX forms if needed
-    initAjaxForms();
     
     /**
      * Accessibility improvements
@@ -301,17 +180,6 @@
             }
         });
         
-        // Improve error message accessibility
-        $(document).on('DOMNodeInserted', '.newsletter-field-error', function() {
-            var $error = $(this);
-            var $field = $error.prev('input, select, textarea');
-            
-            if ($field.length > 0) {
-                var errorId = 'newsletter-error-' + Math.random().toString(36).substr(2, 9);
-                $error.attr('id', errorId);
-                $field.attr('aria-describedby', errorId);
-            }
-        });
     }
     
     // Initialize accessibility improvements

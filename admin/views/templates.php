@@ -6,6 +6,8 @@
  * @since 2.0.0
  */
 
+declare(strict_types=1);
+
 defined('ABSPATH') || exit;
 ?>
 
@@ -101,7 +103,7 @@ defined('ABSPATH') || exit;
         <h3><?php esc_html_e('Send Test Email', 'edh-newsletter'); ?></h3>
         <p><?php esc_html_e('Send a test email to see how your template looks in an actual email client.', 'edh-newsletter'); ?></p>
         
-        <form class="newsletter-test-email-form">
+        <form class="newsletter-test-email-form" method="post" action="#">
             <table class="form-table">
                 <tr>
                     <th scope="row">

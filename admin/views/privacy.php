@@ -6,6 +6,8 @@
  * @since 2.0.0
  */
 
+declare(strict_types=1);
+
 defined('ABSPATH') || exit;
 ?>
 
@@ -66,6 +68,69 @@ defined('ABSPATH') || exit;
                         <?php esc_html_e('How long to keep unsubscribed user data before automatic deletion. Set to 0 to disable automatic cleanup.', 'edh-newsletter'); ?>
                         <br>
                         <strong><?php esc_html_e('Recommended: 365 days (1 year)', 'edh-newsletter'); ?></strong>
+                    </p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="newsletter-form-section">
+            <h3><?php esc_html_e('Spam Protection', 'edh-newsletter'); ?></h3>
+            <p class="description"><?php esc_html_e('A hidden honeypot field and a minimum fill time are always active on the signup and preferences forms. The settings below tune the remaining controls.', 'edh-newsletter'); ?></p>
+            
+            <div class="newsletter-field-group">
+                <label for="newsletter_spam_min_seconds"><?php esc_html_e('Minimum Fill Time', 'edh-newsletter'); ?></label>
+                <div>
+                    <input type="number" name="newsletter_spam_min_seconds" id="newsletter_spam_min_seconds"
+                           value="<?php echo esc_attr((string) get_option('newsletter_spam_min_seconds', 3)); ?>"
+                           min="0" max="60" class="small-text">
+                    <span><?php esc_html_e('seconds', 'edh-newsletter'); ?></span>
+                    <p class="description"><?php esc_html_e('Submissions faster than this after the page loads are treated as bots. 0 disables the check.', 'edh-newsletter'); ?></p>
+                </div>
+            </div>
+            
+            <div class="newsletter-field-group">
+                <label for="newsletter_spam_max_per_hour"><?php esc_html_e('Submissions per IP per hour', 'edh-newsletter'); ?></label>
+                <div>
+                    <input type="number" name="newsletter_spam_max_per_hour" id="newsletter_spam_max_per_hour"
+                           value="<?php echo esc_attr((string) get_option('newsletter_spam_max_per_hour', 10)); ?>"
+                           min="1" max="1000" class="small-text">
+                    <p class="description"><?php esc_html_e('Each email address is also limited to 3 submissions per hour, which stops the form being used to flood someone else\'s inbox.', 'edh-newsletter'); ?></p>
+                </div>
+            </div>
+            
+            <div class="newsletter-field-group">
+                <label for="newsletter_block_disposable_emails"><?php esc_html_e('Disposable Addresses', 'edh-newsletter'); ?></label>
+                <div>
+                    <label>
+                        <input type="checkbox" name="newsletter_block_disposable_emails" id="newsletter_block_disposable_emails"
+                               value="1" <?php checked(get_option('newsletter_block_disposable_emails', 1)); ?>>
+                        <?php esc_html_e('Reject signups from known disposable email domains', 'edh-newsletter'); ?>
+                    </label>
+                    <p class="description"><?php esc_html_e('Extend the built-in list with the edh_newsletter_disposable_email_domains filter.', 'edh-newsletter'); ?></p>
+                </div>
+            </div>
+            
+            <div class="newsletter-field-group">
+                <label for="newsletter_suppressed_emails"><?php esc_html_e('Suppression List', 'edh-newsletter'); ?></label>
+                <div>
+                    <textarea name="newsletter_suppressed_emails" id="newsletter_suppressed_emails" rows="5" class="large-text code"><?php echo esc_textarea((string) get_option('newsletter_suppressed_emails', '')); ?></textarea>
+                    <p class="description"><?php esc_html_e('One entry per line. A full address blocks that address; a domain (e.g. example.com) blocks every address at it.', 'edh-newsletter'); ?></p>
+                </div>
+            </div>
+            
+            <div class="newsletter-field-group">
+                <label for="newsletter_turnstile_site_key"><?php esc_html_e('Cloudflare Turnstile', 'edh-newsletter'); ?></label>
+                <div>
+                    <input type="text" name="newsletter_turnstile_site_key" id="newsletter_turnstile_site_key"
+                           value="<?php echo esc_attr((string) get_option('newsletter_turnstile_site_key', '')); ?>"
+                           class="regular-text" placeholder="<?php esc_attr_e('Site key', 'edh-newsletter'); ?>" autocomplete="off">
+                    <br>
+                    <input type="password" name="newsletter_turnstile_secret_key" id="newsletter_turnstile_secret_key"
+                           value="<?php echo esc_attr((string) get_option('newsletter_turnstile_secret_key', '')); ?>"
+                           class="regular-text" placeholder="<?php esc_attr_e('Secret key', 'edh-newsletter'); ?>" autocomplete="new-password" style="margin-top: 6px;">
+                    <p class="description">
+                        <?php esc_html_e('Optional. When both keys are set, a Turnstile challenge is added to the forms and verified on submit. Turnstile is free and shows no puzzle to most visitors.', 'edh-newsletter'); ?>
+                        <a href="https://dash.cloudflare.com/?to=/:account/turnstile" target="_blank" rel="noopener noreferrer"><?php esc_html_e('Get keys', 'edh-newsletter'); ?></a>
                     </p>
                 </div>
             </div>

@@ -345,7 +345,7 @@ class EDH_Newsletter_Privacy_Manager {
     private function cleanup_expired_subscribers(): void {
         global $wpdb;
         
-        $retention_days = get_option('newsletter_data_retention_days', 365);
+        $retention_days = (int) get_option('newsletter_data_retention_days', 365);
         
         if ($retention_days <= 0) {
             return; // No cleanup if retention is disabled
@@ -355,12 +355,13 @@ class EDH_Newsletter_Privacy_Manager {
         $cutoff_date = gmdate('Y-m-d H:i:s', strtotime("-{$retention_days} days"));
         
         // Delete unsubscribed subscribers older than retention period
-        // Note: $wpdb->delete() doesn't support comparison operators, so we use a prepared query
+        // phpcs:disable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, PluginCheck.Security.DirectDB.UnescapedDBParameter -- custom table; name is esc_sql()'d, values are prepared
         $deleted = $wpdb->query($wpdb->prepare(
             "DELETE FROM `{$table_name}` WHERE `status` = %s AND `updated_at` < %s",
             'unsubscribed',
             $cutoff_date
         ));
+        // phpcs:enable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, PluginCheck.Security.DirectDB.UnescapedDBParameter
         
         if ($deleted > 0) {
             do_action('edh_newsletter_expired_subscribers_cleaned', $deleted);
@@ -368,26 +369,32 @@ class EDH_Newsletter_Privacy_Manager {
     }
     
     /**
-     * Cleanup expired confirmation tokens
+     * Remove pending subscribers whose confirmation window has expired.
+     *
+     * Rows are deleted rather than having their token blanked: a pending row
+     * with an empty token would otherwise match an empty confirmation token.
      */
     private function cleanup_expired_tokens(): void {
         global $wpdb;
         
-        $token_expiry_hours = get_option('newsletter_token_expiry_hours', 24);
+        $token_expiry_hours = (int) get_option('newsletter_token_expiry_hours', 24);
+        if ($token_expiry_hours <= 0) {
+            return;
+        }
+        
         $table_name = esc_sql($wpdb->prefix . 'newsletter_subscribers');
         $cutoff_date = gmdate('Y-m-d H:i:s', strtotime("-{$token_expiry_hours} hours"));
         
-        // Clear tokens from pending subscribers older than expiry time
-        // Note: $wpdb->update() doesn't support comparison operators, so we use a prepared query
-        $updated = $wpdb->query($wpdb->prepare(
-            "UPDATE `{$table_name}` SET `token` = %s WHERE `status` = %s AND `created_at` < %s",
-            '',
+        // phpcs:disable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, PluginCheck.Security.DirectDB.UnescapedDBParameter -- custom table; name is esc_sql()'d, values are prepared
+        $deleted = $wpdb->query($wpdb->prepare(
+            "DELETE FROM `{$table_name}` WHERE `status` = %s AND `created_at` < %s",
             'pending',
             $cutoff_date
         ));
+        // phpcs:enable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, PluginCheck.Security.DirectDB.UnescapedDBParameter
         
-        if ($updated > 0) {
-            do_action('edh_newsletter_expired_tokens_cleaned', $updated);
+        if ($deleted > 0) {
+            do_action('edh_newsletter_expired_tokens_cleaned', $deleted);
         }
     }
     
@@ -489,12 +496,25 @@ class EDH_Newsletter_Privacy_Manager {
      * Check if email is suppressed
      */
     private function is_email_suppressed(string $email): bool {
-        // This could integrate with external suppression lists
-        // For now, just check a simple option
-        $suppressed_emails = get_option('newsletter_suppressed_emails', '');
-        $suppressed_list = array_filter(array_map('trim', explode("\n", $suppressed_emails)));
+        // One entry per line: a full address, or a domain (with or without a leading @)
+        $entries = array_filter(array_map('trim', explode("\n", (string) get_option('newsletter_suppressed_emails', ''))));
         
-        return in_array(strtolower($email), array_map('strtolower', $suppressed_list));
+        if (empty($entries)) {
+            return false;
+        }
+        
+        $email = strtolower($email);
+        $domain = substr(strrchr($email, '@') ?: '', 1);
+        
+        foreach ($entries as $entry) {
+            $entry = strtolower(ltrim($entry, '@'));
+            
+            if (strpos($entry, '@') !== false ? $entry === $email : $entry === $domain) {
+                return true;
+            }
+        }
+        
+        return false;
     }
     
     /**

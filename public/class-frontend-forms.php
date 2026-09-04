@@ -28,15 +28,16 @@ class EDH_Newsletter_Frontend_Forms {
      * Initialize hooks
      */
     private function init_hooks() {
-        add_action('init', [$this, 'handle_public_actions']);
+        // This object is constructed on init@10, so the dispatcher must use a later hook.
+        add_action('template_redirect', [$this, 'handle_public_actions']);
         add_shortcode('newsletter_signup', [$this, 'render_signup_shortcode']);
         add_shortcode('newsletter_preferences', [$this, 'render_preferences_shortcode']);
-        add_action('wp_enqueue_scripts', [$this, 'enqueue_public_scripts']);
     }
     
     /**
      * Handle public actions (confirmation, unsubscribe, etc.)
      */
+    // phpcs:disable WordPress.Security.NonceVerification.Recommended -- these GET links carry their own credential: a random confirmation token or a signed action token, verified before any change is made.
     public function handle_public_actions(): void {
         if (!isset($_GET['newsletter_action'])) {
             return;
@@ -61,12 +62,12 @@ class EDH_Newsletter_Frontend_Forms {
      * Handle subscription confirmation
      */
     private function handle_confirmation(): void {
-        if (!isset($_GET['token'])) {
+        $token = sanitize_text_field(wp_unslash($_GET['token'] ?? ''));
+        
+        if ($token === '') {
             $this->show_message(__('Invalid confirmation link.', 'edh-newsletter'), 'error');
             return;
         }
-        
-        $token = sanitize_text_field($_GET['token']);
         $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
         
         if (!$subscriber_manager) {
@@ -108,25 +109,15 @@ class EDH_Newsletter_Frontend_Forms {
             return;
         }
         
-        $subscriber_id = absint($_GET['subscriber_id']);
-        $token = sanitize_text_field($_GET['token']);
+        $subscriber = $this->resolve_action_link('unsubscribe');
         
-        $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
-        $email_sender = EDH_Newsletter_Core::get_instance()->get_module('email_sender');
-        
-        if (!$subscriber_manager || !$email_sender) {
-            $this->show_message(__('Service temporarily unavailable.', 'edh-newsletter'), 'error');
-            return;
-        }
-        
-        $subscriber = $subscriber_manager->get_subscriber($subscriber_id);
-        
-        if (!$subscriber || !$email_sender->verify_action_token($subscriber, 'unsubscribe', $token)) {
+        if (!$subscriber) {
             $this->show_message(__('Invalid unsubscribe link.', 'edh-newsletter'), 'error');
             return;
         }
         
         // Show unsubscribe form
+        $this->enqueue_public_scripts();
         $this->render_unsubscribe_form($subscriber);
     }
     
@@ -139,37 +130,59 @@ class EDH_Newsletter_Frontend_Forms {
             return;
         }
         
-        $subscriber_id = absint($_GET['subscriber_id']);
-        $token = sanitize_text_field($_GET['token']);
+        $subscriber = $this->resolve_action_link('preferences');
+        
+        if (!$subscriber) {
+            $this->show_message(__('Invalid preferences link.', 'edh-newsletter'), 'error');
+            return;
+        }
+        
+        // Handle preferences form submission
+        if ($_POST && isset($_POST['newsletter_preferences_nonce'])) { // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified in process_preferences_form()
+            $this->process_preferences_form($subscriber);
+        } else {
+            // Show preferences form
+            $this->enqueue_public_scripts();
+            $this->render_preferences_form($subscriber);
+        }
+    }
+    
+    /**
+     * Load the subscriber referenced by a signed action link, or null if the link is invalid
+     */
+    private function resolve_action_link(string $action): ?array {
+        $subscriber_id = absint($_GET['subscriber_id'] ?? 0);
+        $token = sanitize_text_field(wp_unslash($_GET['token'] ?? ''));
+        
+        if ($subscriber_id === 0 || $token === '') {
+            return null;
+        }
         
         $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
         $email_sender = EDH_Newsletter_Core::get_instance()->get_module('email_sender');
         
         if (!$subscriber_manager || !$email_sender) {
             $this->show_message(__('Service temporarily unavailable.', 'edh-newsletter'), 'error');
-            return;
+            return null;
         }
         
         $subscriber = $subscriber_manager->get_subscriber($subscriber_id);
         
-        if (!$subscriber || !$email_sender->verify_action_token($subscriber, 'preferences', $token)) {
-            $this->show_message(__('Invalid preferences link.', 'edh-newsletter'), 'error');
-            return;
+        if (!$subscriber || !$email_sender->verify_action_token($subscriber, $action, $token)) {
+            return null;
         }
         
-        // Handle preferences form submission
-        if ($_POST && isset($_POST['newsletter_preferences_nonce'])) {
-            $this->process_preferences_form($subscriber);
-        } else {
-            // Show preferences form
-            $this->render_preferences_form($subscriber);
-        }
+        return $subscriber;
     }
+    
+    // phpcs:enable WordPress.Security.NonceVerification.Recommended
     
     /**
      * Render signup shortcode
      */
     public function render_signup_shortcode($atts): string {
+        $this->enqueue_public_scripts();
+        
         $atts = shortcode_atts([
             'title' => __('Subscribe to Our Newsletter', 'edh-newsletter'),
             'description' => __('Get the latest updates delivered to your inbox.', 'edh-newsletter'),
@@ -181,7 +194,7 @@ class EDH_Newsletter_Frontend_Forms {
         
         // Handle form submission
         $message = '';
-        if ($_POST && isset($_POST['newsletter_signup_nonce'])) {
+        if ($_POST && isset($_POST['newsletter_signup_nonce'])) { // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified in process_signup_form()
             $message = $this->process_signup_form();
         }
         
@@ -194,6 +207,8 @@ class EDH_Newsletter_Frontend_Forms {
      * Render preferences shortcode
      */
     public function render_preferences_shortcode($atts): string {
+        $this->enqueue_public_scripts();
+        
         $atts = shortcode_atts([
             'title' => __('Manage Your Newsletter Preferences', 'edh-newsletter'),
         ], $atts);
@@ -207,11 +222,12 @@ class EDH_Newsletter_Frontend_Forms {
         echo '<form method="post" class="newsletter-form">';
         wp_nonce_field('newsletter_preferences_lookup', 'newsletter_preferences_lookup_nonce');
         echo '<input type="email" name="email" placeholder="' . esc_attr__('Your email address', 'edh-newsletter') . '" required>';
+        $this->render_spam_guard_fields('lookup');
         echo '<button type="submit" name="lookup_preferences">' . esc_html__('Manage Preferences', 'edh-newsletter') . '</button>';
         echo '</form>';
         
         // Handle lookup
-        if ($_POST && isset($_POST['lookup_preferences'])) {
+        if ($_POST && isset($_POST['lookup_preferences'])) { // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified in handle_preferences_lookup()
             $this->handle_preferences_lookup();
         }
         
@@ -223,11 +239,11 @@ class EDH_Newsletter_Frontend_Forms {
      * Process signup form submission
      */
     private function process_signup_form(): string {
-        if (!wp_verify_nonce($_POST['newsletter_signup_nonce'] ?? '', 'newsletter_signup')) {
+        if (!wp_verify_nonce($this->post_field('newsletter_signup_nonce'), 'newsletter_signup')) {
             return $this->get_message(__('Security check failed. Please try again.', 'edh-newsletter'), 'error');
         }
         
-        $email = sanitize_email($_POST['email'] ?? '');
+        $email = sanitize_email($this->post_field('email'));
         $frequency = sanitize_key($_POST['frequency'] ?? 'weekly');
         $privacy_consent = !empty($_POST['privacy_consent']);
         
@@ -254,11 +270,22 @@ class EDH_Newsletter_Frontend_Forms {
             return $this->get_message(implode(' ', $privacy_errors), 'error');
         }
         
+        // Bot and abuse checks
+        $spam_guard = EDH_Newsletter_Core::get_instance()->get_module('spam_guard');
+        $verdict = $spam_guard ? $spam_guard->check('signup', $email) : ['ok' => true, 'silent' => false, 'message' => ''];
+        if (!$verdict['ok']) {
+            // A silent verdict shows the normal success text so bots get no feedback
+            return $verdict['silent']
+                ? $this->get_message(__('Thank you! Please check your email and click the confirmation link to complete your subscription.', 'edh-newsletter'), 'success')
+                : $this->get_message($verdict['message'], 'error');
+        }
+        
         // Create subscriber
         $subscriber_data = [
             'email' => $email,
             'digest_frequency' => $frequency,
             'status' => 'pending',
+            'privacy_consent' => $privacy_consent,
         ];
         
         $result = $subscriber_manager->create_subscriber($subscriber_data);
@@ -270,8 +297,8 @@ class EDH_Newsletter_Frontend_Forms {
         // Record privacy consent
         if ($privacy_consent) {
             $privacy_manager->record_consent($result['data']['id'], [
-                'ip_address' => $_SERVER['REMOTE_ADDR'] ?? '',
-                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
+                'ip_address' => isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'])) : '',
+                'user_agent' => isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field(wp_unslash($_SERVER['HTTP_USER_AGENT'])) : '',
                 'timestamp' => current_time('mysql'),
             ]);
         }
@@ -296,7 +323,7 @@ class EDH_Newsletter_Frontend_Forms {
      * Process preferences form submission
      */
     private function process_preferences_form(array $subscriber): void {
-        if (!wp_verify_nonce($_POST['newsletter_preferences_nonce'] ?? '', 'newsletter_preferences_' . $subscriber['id'])) {
+        if (!wp_verify_nonce($this->post_field('newsletter_preferences_nonce'), 'newsletter_preferences_' . $subscriber['id'])) {
             $this->show_message(__('Security check failed. Please try again.', 'edh-newsletter'), 'error');
             return;
         }
@@ -310,6 +337,18 @@ class EDH_Newsletter_Frontend_Forms {
         
         $new_frequency = sanitize_key($_POST['digest_frequency'] ?? $subscriber['digest_frequency']);
         $action = sanitize_key($_POST['action'] ?? '');
+        
+        // Only confirmed (active or paused) subscriptions can be managed here.
+        // Pending rows must confirm by email; unsubscribed rows must sign up again.
+        if (!in_array($subscriber['status'], ['subscribed', 'paused'], true)) {
+            $this->show_message(__('This subscription is not active. Please sign up again to receive the newsletter.', 'edh-newsletter'), 'error');
+            return;
+        }
+        
+        if (($action === 'pause' && $subscriber['status'] !== 'subscribed') || ($action === 'resume' && $subscriber['status'] !== 'paused')) {
+            $this->show_message(__('That action is not available for your subscription.', 'edh-newsletter'), 'error');
+            return;
+        }
         
         switch ($action) {
             case 'update':
@@ -343,6 +382,9 @@ class EDH_Newsletter_Frontend_Forms {
                     $this->show_message(__('Failed to resume subscription. Please try again.', 'edh-newsletter'), 'error');
                 }
                 break;
+                
+            default:
+                $this->show_message(__('No action was selected.', 'edh-newsletter'), 'error');
         }
     }
     
@@ -350,12 +392,12 @@ class EDH_Newsletter_Frontend_Forms {
      * Handle preferences lookup
      */
     private function handle_preferences_lookup(): void {
-        if (!wp_verify_nonce($_POST['newsletter_preferences_lookup_nonce'] ?? '', 'newsletter_preferences_lookup')) {
+        if (!wp_verify_nonce($this->post_field('newsletter_preferences_lookup_nonce'), 'newsletter_preferences_lookup')) {
             echo wp_kses_post($this->get_message(esc_html__('Security check failed.', 'edh-newsletter'), 'error'));
             return;
         }
         
-        $email = sanitize_email($_POST['email'] ?? '');
+        $email = sanitize_email($this->post_field('email'));
         
         if (!is_email($email)) {
             echo wp_kses_post($this->get_message(esc_html__('Please enter a valid email address.', 'edh-newsletter'), 'error'));
@@ -370,46 +412,39 @@ class EDH_Newsletter_Frontend_Forms {
             return;
         }
         
-        $subscriber = $subscriber_manager->get_subscriber_by_email($email);
-        
-        if (!$subscriber) {
-            echo wp_kses_post($this->get_message(esc_html__('No subscription found for this email address.', 'edh-newsletter'), 'error'));
+        $spam_guard = EDH_Newsletter_Core::get_instance()->get_module('spam_guard');
+        $verdict = $spam_guard ? $spam_guard->check('lookup', $email) : ['ok' => true, 'silent' => false, 'message' => ''];
+        if (!$verdict['ok'] && !$verdict['silent']) {
+            echo wp_kses_post($this->get_message($verdict['message'], 'error'));
             return;
         }
         
-        // Generate preferences link and send via email
-        $token = hash('sha256', $subscriber['email'] . $subscriber['id'] . 'preferences' . AUTH_KEY);
-        $preferences_url = add_query_arg([
-            'newsletter_action' => 'preferences',
-            'subscriber_id' => $subscriber['id'],
-            'token' => $token,
-        ], home_url('/'));
+        // A silent verdict falls through to the neutral message below without sending anything
+        $subscriber = $verdict['ok'] ? $subscriber_manager->get_subscriber_by_email($email) : null;
         
-        // Send preferences email (simplified version)
-        $subject = sprintf(
-            // translators: %1$s: Site name
-            __('Manage your %1$s newsletter preferences', 'edh-newsletter'),
-            get_bloginfo('name')
-        );
-        $message = sprintf(
-            // translators: %1$s: Preferences management URL
-            __('Click here to manage your newsletter preferences: %1$s', 'edh-newsletter'),
-            $preferences_url
-        );
-        
-        $sent = wp_mail($email, $subject, $message);
-        
-        if ($sent) {
-            echo wp_kses_post($this->get_message(
-                esc_html__('A preferences management link has been sent to your email address.', 'edh-newsletter'),
-                'success'
-            ));
-        } else {
-            echo wp_kses_post($this->get_message(
-                esc_html__('Failed to send preferences link. Please try again.', 'edh-newsletter'),
-                'error'
-            ));
+        // Only confirmed subscriptions get a management link. The response is the
+        // same either way so the form cannot be used to test whether an address is on the list.
+        if ($subscriber && in_array($subscriber['status'], ['subscribed', 'paused'], true)) {
+            $preferences_url = $email_sender->generate_preferences_url($subscriber);
+            
+            $subject = sprintf(
+                // translators: %1$s: Site name
+                __('Manage your %1$s newsletter preferences', 'edh-newsletter'),
+                get_bloginfo('name')
+            );
+            $message = sprintf(
+                // translators: %1$s: Preferences management URL
+                __('Click here to manage your newsletter preferences: %1$s', 'edh-newsletter'),
+                $preferences_url
+            );
+            
+            wp_mail($email, $subject, $message);
         }
+        
+        echo wp_kses_post($this->get_message(
+            esc_html__('If that address has an active subscription, a preferences management link has been sent to it.', 'edh-newsletter'),
+            'success'
+        ));
     }
     
     /**
@@ -462,6 +497,8 @@ class EDH_Newsletter_Frontend_Forms {
             echo '</div>';
         }
         
+        $this->render_spam_guard_fields('signup');
+        
         echo '<div class="newsletter-field">';
         echo '<button type="submit" name="newsletter_signup">' . esc_html($atts['button_text']) . '</button>';
         echo '</div>';
@@ -476,7 +513,7 @@ class EDH_Newsletter_Frontend_Forms {
     private function render_unsubscribe_form(array $subscriber): void {
         $privacy_manager = EDH_Newsletter_Core::get_instance()->get_module('privacy_manager');
         
-        if ($_POST && isset($_POST['newsletter_unsubscribe_nonce'])) {
+        if ($_POST && isset($_POST['newsletter_unsubscribe_nonce'])) { // phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified in process_unsubscribe_form()
             $this->process_unsubscribe_form($subscriber);
             return;
         }
@@ -567,14 +604,14 @@ class EDH_Newsletter_Frontend_Forms {
      * Process unsubscribe form
      */
     private function process_unsubscribe_form(array $subscriber): void {
-        if (!wp_verify_nonce($_POST['newsletter_unsubscribe_nonce'] ?? '', 'newsletter_unsubscribe_' . $subscriber['id'])) {
+        if (!wp_verify_nonce($this->post_field('newsletter_unsubscribe_nonce'), 'newsletter_unsubscribe_' . $subscriber['id'])) {
             $this->show_message(__('Security check failed.', 'edh-newsletter'), 'error');
             return;
         }
         
         $action = sanitize_key($_POST['action'] ?? '');
         $reason = sanitize_key($_POST['reason'] ?? '');
-        $comments = sanitize_textarea_field($_POST['comments'] ?? '');
+        $comments = sanitize_textarea_field($this->post_field('comments'));
         
         $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
         
@@ -600,6 +637,11 @@ class EDH_Newsletter_Frontend_Forms {
                 $this->show_message(__('Failed to unsubscribe. Please try again.', 'edh-newsletter'), 'error');
             }
         } elseif ($action === 'pause') {
+            if ($subscriber['status'] !== 'subscribed') {
+                $this->show_message(__('Only an active subscription can be paused.', 'edh-newsletter'), 'error');
+                return;
+            }
+            
             $result = $subscriber_manager->pause_subscription($subscriber['id']);
             
             if ($result['success']) {
@@ -610,11 +652,16 @@ class EDH_Newsletter_Frontend_Forms {
             } else {
                 $this->show_message(__('Failed to pause subscription. Please try again.', 'edh-newsletter'), 'error');
             }
+        } else {
+            $this->show_message(__('No action was selected.', 'edh-newsletter'), 'error');
         }
     }
     
     /**
-     * Enqueue public scripts and styles
+     * Enqueue public scripts and styles.
+     *
+     * Called only when a form is actually rendered (shortcode or action page),
+     * so pages without a newsletter form do not load jQuery or these assets.
      */
     public function enqueue_public_scripts(): void {
         wp_enqueue_style(
@@ -631,6 +678,25 @@ class EDH_Newsletter_Frontend_Forms {
             EDH_NEWSLETTER_VERSION,
             true
         );
+    }
+    
+    /**
+     * Output the honeypot, signed timestamp and optional Turnstile widget
+     */
+    private function render_spam_guard_fields(string $form): void {
+        $spam_guard = EDH_Newsletter_Core::get_instance()->get_module('spam_guard');
+        if ($spam_guard) {
+            $spam_guard->render_fields($form);
+        }
+    }
+    
+    /**
+     * Read a posted field, unslashed, as a plain string ('' when absent).
+     * Callers apply the sanitizer appropriate to the field.
+     */
+    private function post_field(string $key): string {
+        // phpcs:ignore WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- nonce is checked by the caller; the value is sanitized by the caller
+        return isset($_POST[$key]) && is_string($_POST[$key]) ? wp_unslash($_POST[$key]) : '';
     }
     
     /**

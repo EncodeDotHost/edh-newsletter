@@ -18,6 +18,18 @@ defined('ABSPATH') || exit;
 class EDH_Newsletter_Email_Sender {
     
     /**
+     * Cron hook for one batch of a digest run
+     */
+    const BATCH_HOOK = 'edh_newsletter_send_digest_batch';
+    
+    /**
+     * Placeholder URLs rendered once per run and swapped per recipient.
+     * They are valid URLs so esc_url() in templates leaves them intact.
+     */
+    const UNSUBSCRIBE_PLACEHOLDER = 'https://placeholder.invalid/edh-newsletter/unsubscribe';
+    const PREFERENCES_PLACEHOLDER = 'https://placeholder.invalid/edh-newsletter/preferences';
+    
+    /**
      * Constructor
      */
     public function __construct() {
@@ -30,7 +42,8 @@ class EDH_Newsletter_Email_Sender {
     private function init_hooks() {
         add_action('edh_newsletter_send_weekly_digest', [$this, 'send_weekly_digest']);
         add_action('edh_newsletter_send_monthly_digest', [$this, 'send_monthly_digest']);
-        add_filter('wp_mail_content_type', [$this, 'set_html_content_type']);
+        add_action(self::BATCH_HOOK, [$this, 'send_digest_batch'], 10, 3);
+        // Content type is set per message via get_email_headers(); no site-wide wp_mail_content_type filter.
     }
     
     /**
@@ -48,88 +61,156 @@ class EDH_Newsletter_Email_Sender {
     }
     
     /**
-     * Send digest emails based on frequency
+     * Start a digest run: render the email once, then send it in batches.
+     *
+     * The first batch is sent immediately; further batches are scheduled as
+     * single cron events so a large list never has to finish inside one request.
      */
     public function send_digest(string $frequency): void {
-        $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
+        $frequency = $frequency === 'monthly' ? 'monthly' : 'weekly';
         $template_manager = EDH_Newsletter_Core::get_instance()->get_module('template_manager');
+        $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
         
         if (!$subscriber_manager || !$template_manager) {
-            if (defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
-                // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-                error_log('Newsletter: Required modules not available for digest sending');
-            }
+            $this->log('Required modules not available for digest sending');
             return;
         }
         
-        // Get subscribers for this frequency
-        $subscribers = $subscriber_manager->get_subscribers([
-            'status' => 'subscribed',
-            'frequency' => $frequency
-        ]);
-        
-        if (empty($subscribers)) {
+        if ($subscriber_manager->get_subscriber_count(['status' => 'subscribed', 'frequency' => $frequency]) === 0) {
             return;
         }
         
-        // Get posts for the digest period
         $posts = $this->get_digest_posts($frequency);
         
-        // Generate email content
         $email_data = [
             'posts' => $posts,
             'frequency' => $frequency,
-            'subscriber_count' => count($subscribers),
             'blog_name' => get_bloginfo('name'),
             'blog_url' => home_url(),
         ];
         
-        $subject = $this->generate_subject($posts, $frequency);
+        $run = [
+            'frequency' => $frequency,
+            'subject' => $this->generate_subject($posts, $frequency),
+            'email_data' => $email_data,
+            'body' => '',
+            'sent' => 0,
+            'failed' => 0,
+            'post_count' => count($posts),
+            'started' => time(),
+        ];
         
-        // Send emails to subscribers
-        foreach ($subscribers as $subscriber) {
-            $this->send_digest_email($subscriber, $subject, $email_data, $template_manager);
+        /**
+         * Filter whether the digest body is rendered separately for every recipient.
+         * Off by default: the body is rendered once and only the two footer URLs
+         * differ per subscriber. Enable if a template override uses $subscriber.
+         */
+        $per_recipient = (bool) apply_filters('edh_newsletter_render_per_recipient', false, $frequency);
+        
+        if (!$per_recipient) {
+            $run['body'] = $template_manager->render_digest_template(array_merge($email_data, [
+                'subscriber' => [],
+                'unsubscribe_url' => self::UNSUBSCRIBE_PLACEHOLDER,
+                'manage_preferences_url' => self::PREFERENCES_PLACEHOLDER,
+            ]));
         }
         
-        // Log digest sending
-        do_action('edh_newsletter_digest_sent', $frequency, count($subscribers), count($posts));
+        $run_id = wp_generate_uuid4();
+        set_transient($this->run_key($run_id), $run, DAY_IN_SECONDS);
+        
+        $this->send_digest_batch($frequency, $run_id, 0);
     }
     
     /**
-     * Send individual digest email to subscriber
+     * Send one batch of a digest run and schedule the next one.
      */
-    private function send_digest_email(array $subscriber, string $subject, array $email_data, $template_manager): bool {
-        // Add subscriber-specific data
-        $email_data['subscriber'] = $subscriber;
-        $email_data['unsubscribe_url'] = $this->generate_unsubscribe_url($subscriber);
-        $email_data['manage_preferences_url'] = $this->generate_preferences_url($subscriber);
+    public function send_digest_batch(string $frequency, string $run_id, int $after_id = 0): void {
+        $run = get_transient($this->run_key($run_id));
         
-        // Generate email content using template manager
-        $email_content = $template_manager->render_digest_template($email_data);
+        if (!is_array($run)) {
+            $this->log("Digest run {$run_id} state missing; aborting");
+            return;
+        }
         
-        // Prepare headers
+        $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
+        $template_manager = EDH_Newsletter_Core::get_instance()->get_module('template_manager');
+        
+        if (!$subscriber_manager || !$template_manager) {
+            $this->log('Required modules not available for digest batch');
+            return;
+        }
+        
+        $batch_size = max(1, (int) apply_filters('edh_newsletter_digest_batch_size', 100, $frequency));
+        
+        $subscribers = $subscriber_manager->get_subscribers([
+            'status' => 'subscribed',
+            'frequency' => $frequency,
+            'after_id' => $after_id,
+            'orderby' => 'id',
+            'order' => 'ASC',
+            'limit' => $batch_size,
+        ]);
+        
         $headers = $this->get_email_headers();
+        $sent_ids = [];
+        $last_id = $after_id;
         
-        // Send email
-        $sent = wp_mail($subscriber['email'], $subject, $email_content, $headers);
-        
-        if ($sent) {
-            // Update engagement tracking
-            $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
-            if ($subscriber_manager) {
-                $subscriber_manager->update_engagement($subscriber['id']);
+        foreach ($subscribers as $subscriber) {
+            $last_id = $subscriber['id'];
+            
+            if ($run['body'] !== '') {
+                $content = str_replace(
+                    [esc_url(self::UNSUBSCRIBE_PLACEHOLDER), esc_url(self::PREFERENCES_PLACEHOLDER), self::UNSUBSCRIBE_PLACEHOLDER, self::PREFERENCES_PLACEHOLDER],
+                    [esc_url($this->generate_unsubscribe_url($subscriber)), esc_url($this->generate_preferences_url($subscriber)), $this->generate_unsubscribe_url($subscriber), $this->generate_preferences_url($subscriber)],
+                    $run['body']
+                );
+            } else {
+                $content = $template_manager->render_digest_template(array_merge($run['email_data'], [
+                    'subscriber' => $subscriber,
+                    'unsubscribe_url' => $this->generate_unsubscribe_url($subscriber),
+                    'manage_preferences_url' => $this->generate_preferences_url($subscriber),
+                ]));
             }
             
-            do_action('edh_newsletter_email_sent', $subscriber, $subject);
-        } else {
-            do_action('edh_newsletter_email_failed', $subscriber, $subject);
-            if (defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
-                // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-                error_log("Newsletter: Failed to send email to {$subscriber['email']}");
+            if (wp_mail($subscriber['email'], $run['subject'], $content, $headers)) {
+                $run['sent']++;
+                $sent_ids[] = $subscriber['id'];
+                do_action('edh_newsletter_email_sent', $subscriber, $run['subject']);
+            } else {
+                $run['failed']++;
+                do_action('edh_newsletter_email_failed', $subscriber, $run['subject']);
+                $this->log("Failed to send email to {$subscriber['email']}");
             }
         }
         
-        return $sent;
+        $subscriber_manager->update_engagement_bulk($sent_ids);
+        $this->update_delivery_stats($frequency, count($sent_ids), count($subscribers) - count($sent_ids));
+        
+        if (count($subscribers) === $batch_size) {
+            set_transient($this->run_key($run_id), $run, DAY_IN_SECONDS);
+            wp_schedule_single_event(time(), self::BATCH_HOOK, [$frequency, $run_id, $last_id]);
+            return;
+        }
+        
+        delete_transient($this->run_key($run_id));
+        do_action('edh_newsletter_digest_sent', $frequency, $run['sent'], $run['post_count'], $run['failed']);
+    }
+    
+    /**
+     * Transient key for a digest run
+     */
+    private function run_key(string $run_id): string {
+        return 'edh_newsletter_run_' . sanitize_key($run_id);
+    }
+    
+    /**
+     * Log a message when debug logging is enabled
+     */
+    private function log(string $message): void {
+        if (defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+            error_log('Newsletter: ' . $message);
+        }
     }
     
     /**
@@ -320,7 +401,7 @@ class EDH_Newsletter_Email_Sender {
     /**
      * Generate unsubscribe URL
      */
-    private function generate_unsubscribe_url(array $subscriber): string {
+    public function generate_unsubscribe_url(array $subscriber): string {
         $token = $this->generate_action_token($subscriber, 'unsubscribe');
         
         return add_query_arg([
@@ -333,7 +414,7 @@ class EDH_Newsletter_Email_Sender {
     /**
      * Generate preferences management URL
      */
-    private function generate_preferences_url(array $subscriber): string {
+    public function generate_preferences_url(array $subscriber): string {
         $token = $this->generate_action_token($subscriber, 'preferences');
         
         return add_query_arg([
@@ -370,13 +451,6 @@ class EDH_Newsletter_Email_Sender {
             sprintf('From: %s <%s>', $from_name, $from_email),
             'Reply-To: ' . $from_email,
         ];
-    }
-    
-    /**
-     * Set HTML content type for emails
-     */
-    public function set_html_content_type(): string {
-        return 'text/html';
     }
     
     /**
@@ -433,19 +507,19 @@ class EDH_Newsletter_Email_Sender {
     }
     
     /**
-     * Update delivery statistics
+     * Update delivery statistics after a batch
      */
-    public function update_delivery_stats(string $type, bool $success = true): void {
-        if ($success) {
-            $total = get_option('newsletter_total_emails_sent', 0);
-            update_option('newsletter_total_emails_sent', $total + 1);
+    public function update_delivery_stats(string $type, int $sent, int $failed = 0): void {
+        if ($sent > 0) {
+            update_option('newsletter_total_emails_sent', (int) get_option('newsletter_total_emails_sent', 0) + $sent, false);
             
-            if (in_array($type, ['weekly', 'monthly'])) {
-                update_option('newsletter_last_digest_sent', current_time('mysql'));
+            if (in_array($type, ['weekly', 'monthly'], true)) {
+                update_option('newsletter_last_digest_sent', current_time('mysql'), false);
             }
-        } else {
-            $failed = get_option('newsletter_failed_deliveries', 0);
-            update_option('newsletter_failed_deliveries', $failed + 1);
+        }
+        
+        if ($failed > 0) {
+            update_option('newsletter_failed_deliveries', (int) get_option('newsletter_failed_deliveries', 0) + $failed, false);
         }
     }
 }

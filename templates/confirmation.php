@@ -2,6 +2,10 @@
 /**
  * Default Confirmation Email Template
  */
+
+declare(strict_types=1);
+
+defined('ABSPATH') || exit;
 $edh_newsletter_brand_color = get_option("newsletter_brand_color", "#1e73be");
 $edh_newsletter_logo_url = get_option("newsletter_logo_url", "");
 ?>

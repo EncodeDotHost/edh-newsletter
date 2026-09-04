@@ -18,6 +18,11 @@ defined('ABSPATH') || exit;
 class EDH_Newsletter_Admin_Interface {
     
     /**
+     * Hook suffixes (screen ids) of the plugin's admin pages, filled by add_admin_menu()
+     */
+    private $page_hooks = [];
+    
+    /**
      * Constructor
      */
     public function __construct() {
@@ -33,7 +38,17 @@ class EDH_Newsletter_Admin_Interface {
         add_action('admin_enqueue_scripts', [$this, 'enqueue_admin_scripts']);
         add_action('wp_ajax_newsletter_test_email', [$this, 'handle_test_email']);
         add_action('wp_ajax_newsletter_trigger_digest', [$this, 'handle_trigger_digest']);
+        add_action('wp_ajax_newsletter_run_cleanup', [$this, 'handle_run_cleanup']);
         add_action('admin_notices', [$this, 'show_admin_notices']);
+        // CSV export must run before any output
+        add_action('admin_init', [$this, 'maybe_export_subscribers']);
+    }
+    
+    /**
+     * Whether a hook suffix / screen id belongs to one of this plugin's pages
+     */
+    private function is_plugin_page(?string $hook): bool {
+        return $hook !== null && in_array($hook, $this->page_hooks, true);
     }
     
     /**
@@ -41,7 +56,7 @@ class EDH_Newsletter_Admin_Interface {
      */
     public function add_admin_menu(): void {
         // Main menu page
-        add_menu_page(
+        $this->page_hooks[] = add_menu_page(
             __('Newsletter', 'edh-newsletter'),
             __('Newsletter', 'edh-newsletter'),
             'manage_options',
@@ -52,7 +67,7 @@ class EDH_Newsletter_Admin_Interface {
         );
         
         // Dashboard (same as main page)
-        add_submenu_page(
+        $this->page_hooks[] = add_submenu_page(
             'edh-newsletter',
             __('Dashboard', 'edh-newsletter'),
             __('Dashboard', 'edh-newsletter'),
@@ -62,7 +77,7 @@ class EDH_Newsletter_Admin_Interface {
         );
         
         // Subscribers
-        add_submenu_page(
+        $this->page_hooks[] = add_submenu_page(
             'edh-newsletter',
             __('Subscribers', 'edh-newsletter'),
             __('Subscribers', 'edh-newsletter'),
@@ -72,7 +87,7 @@ class EDH_Newsletter_Admin_Interface {
         );
         
         // Settings
-        add_submenu_page(
+        $this->page_hooks[] = add_submenu_page(
             'edh-newsletter',
             __('Settings', 'edh-newsletter'),
             __('Settings', 'edh-newsletter'),
@@ -82,7 +97,7 @@ class EDH_Newsletter_Admin_Interface {
         );
         
         // Templates
-        add_submenu_page(
+        $this->page_hooks[] = add_submenu_page(
             'edh-newsletter',
             __('Templates', 'edh-newsletter'),
             __('Templates', 'edh-newsletter'),
@@ -92,7 +107,7 @@ class EDH_Newsletter_Admin_Interface {
         );
         
         // Privacy
-        add_submenu_page(
+        $this->page_hooks[] = add_submenu_page(
             'edh-newsletter',
             __('Privacy', 'edh-newsletter'),
             __('Privacy', 'edh-newsletter'),
@@ -127,13 +142,21 @@ class EDH_Newsletter_Admin_Interface {
         register_setting('newsletter_privacy_settings', 'newsletter_data_retention_days', 'absint');
         register_setting('newsletter_privacy_settings', 'newsletter_require_privacy_consent', 'absint');
         register_setting('newsletter_privacy_settings', 'newsletter_consent_version', 'sanitize_text_field');
+        
+        // Spam protection
+        register_setting('newsletter_privacy_settings', 'newsletter_suppressed_emails', 'sanitize_textarea_field');
+        register_setting('newsletter_privacy_settings', 'newsletter_block_disposable_emails', 'absint');
+        register_setting('newsletter_privacy_settings', 'newsletter_spam_min_seconds', 'absint');
+        register_setting('newsletter_privacy_settings', 'newsletter_spam_max_per_hour', 'absint');
+        register_setting('newsletter_privacy_settings', 'newsletter_turnstile_site_key', 'sanitize_text_field');
+        register_setting('newsletter_privacy_settings', 'newsletter_turnstile_secret_key', 'sanitize_text_field');
     }
     
     /**
      * Enqueue admin scripts and styles
      */
     public function enqueue_admin_scripts($hook): void {
-        if (strpos($hook, 'edh-newsletter') === false) {
+        if (!$this->is_plugin_page($hook)) {
             return;
         }
         
@@ -141,10 +164,13 @@ class EDH_Newsletter_Admin_Interface {
         wp_enqueue_script('wp-color-picker');
         wp_enqueue_style('wp-color-picker');
         
+        // Native media picker for the logo field (Settings and Templates pages)
+        wp_enqueue_media();
+        
         wp_enqueue_script(
             'newsletter-admin',
             EDH_NEWSLETTER_ASSETS_URL . 'js/admin.js',
-            ['jquery', 'wp-color-picker'],
+            ['jquery', 'wp-color-picker', 'media-editor'],
             EDH_NEWSLETTER_VERSION,
             true
         );
@@ -163,6 +189,9 @@ class EDH_Newsletter_Admin_Interface {
                 'confirm_delete' => __('Are you sure you want to delete this subscriber?', 'edh-newsletter'),
                 'test_email_sent' => __('Test email sent successfully!', 'edh-newsletter'),
                 'digest_triggered' => __('Digest triggered successfully!', 'edh-newsletter'),
+                'cleanup_done' => __('Cleanup completed.', 'edh-newsletter'),
+                'choose_logo' => __('Choose Logo', 'edh-newsletter'),
+                'use_image' => __('Use This Image', 'edh-newsletter'),
                 'error_occurred' => __('An error occurred. Please try again.', 'edh-newsletter'),
             ],
         ]);
@@ -176,12 +205,13 @@ class EDH_Newsletter_Admin_Interface {
         $scheduler = EDH_Newsletter_Core::get_instance()->get_module('digest_scheduler');
         $email_sender = EDH_Newsletter_Core::get_instance()->get_module('email_sender');
         
-        // Get statistics
+        // Get statistics (one GROUP BY query)
+        $counts = $subscriber_manager ? $subscriber_manager->get_status_frequency_counts() : [];
         $stats = [
-            'total_subscribers' => $subscriber_manager ? $subscriber_manager->get_subscriber_count(['status' => 'subscribed']) : 0,
-            'weekly_subscribers' => $subscriber_manager ? $subscriber_manager->get_subscriber_count(['status' => 'subscribed', 'frequency' => 'weekly']) : 0,
-            'monthly_subscribers' => $subscriber_manager ? $subscriber_manager->get_subscriber_count(['status' => 'subscribed', 'frequency' => 'monthly']) : 0,
-            'pending_subscribers' => $subscriber_manager ? $subscriber_manager->get_subscriber_count(['status' => 'pending']) : 0,
+            'total_subscribers' => array_sum($counts['subscribed'] ?? []),
+            'weekly_subscribers' => $counts['subscribed']['weekly'] ?? 0,
+            'monthly_subscribers' => $counts['subscribed']['monthly'] ?? 0,
+            'pending_subscribers' => array_sum($counts['pending'] ?? []),
         ];
         
         $schedule_status = $scheduler ? $scheduler->get_schedule_status() : [];
@@ -201,38 +231,17 @@ class EDH_Newsletter_Admin_Interface {
         }
         
         // Handle actions
-        $message = '';
-        if (isset($_GET['action']) && isset($_GET['id']) && current_user_can('manage_options')) {
-            $id = absint($_GET['id']);
-            
-            switch ($_GET['action']) {
-                case 'delete':
-                    if (wp_verify_nonce($_GET['_wpnonce'] ?? '', 'delete_subscriber_' . $id)) {
-                        $result = $subscriber_manager->delete_subscriber($id);
-                        $message = $result['success'] 
-                            ? '<div class="notice notice-success"><p>' . __('Subscriber deleted successfully.', 'edh-newsletter') . '</p></div>'
-                            : '<div class="notice notice-error"><p>' . __('Error deleting subscriber.', 'edh-newsletter') . '</p></div>';
-                    }
-                    break;
-                    
-                case 'unsubscribe':
-                    if (wp_verify_nonce($_GET['_wpnonce'] ?? '', 'unsubscribe_subscriber_' . $id)) {
-                        $result = $subscriber_manager->unsubscribe($id, 'Admin action');
-                        $message = $result['success'] 
-                            ? '<div class="notice notice-success"><p>' . __('Subscriber unsubscribed successfully.', 'edh-newsletter') . '</p></div>'
-                            : '<div class="notice notice-error"><p>' . __('Error unsubscribing subscriber.', 'edh-newsletter') . '</p></div>';
-                    }
-                    break;
-            }
-        }
+        $message = $this->handle_subscriber_actions($subscriber_manager);
         
         // Get subscribers with pagination
         $per_page = 20;
+        // phpcs:disable WordPress.Security.NonceVerification.Recommended -- read-only list filters
         $page = isset($_GET['paged']) ? max(1, absint($_GET['paged'])) : 1;
         $offset = ($page - 1) * $per_page;
         
         $status_filter = isset($_GET['status']) ? sanitize_key($_GET['status']) : 'all';
         $frequency_filter = isset($_GET['frequency']) ? sanitize_key($_GET['frequency']) : 'all';
+        // phpcs:enable WordPress.Security.NonceVerification.Recommended
         
         $args = [
             'limit' => $per_page,
@@ -241,9 +250,8 @@ class EDH_Newsletter_Admin_Interface {
             'order' => 'DESC',
         ];
         
-        if ($status_filter !== 'all') {
-            $args['status'] = $status_filter;
-        }
+        // 'all' is passed explicitly so the list and the count use the same filter
+        $args['status'] = $status_filter;
         
         if ($frequency_filter !== 'all') {
             $args['frequency'] = $frequency_filter;
@@ -253,6 +261,242 @@ class EDH_Newsletter_Admin_Interface {
         $total_subscribers = $subscriber_manager->get_subscriber_count($args);
         
         include EDH_NEWSLETTER_ADMIN_DIR . 'views/subscribers.php';
+    }
+    
+    /**
+     * Process single, bulk, and add-subscriber actions on the Subscribers page.
+     * Returns notice HTML or an empty string.
+     */
+    private function handle_subscriber_actions(EDH_Newsletter_Subscriber_Manager $subscriber_manager): string {
+        if (!current_user_can('manage_options')) {
+            return '';
+        }
+        
+        // Single row actions (GET with per-id nonce)
+        if (isset($_GET['action'], $_GET['id'])) {
+            $id = absint($_GET['id']);
+            $action = sanitize_key($_GET['action']);
+            
+            if (!in_array($action, ['delete', 'unsubscribe', 'resubscribe'], true)) {
+                return '';
+            }
+            
+            if (!wp_verify_nonce(sanitize_text_field(wp_unslash($_GET['_wpnonce'] ?? '')), "{$action}_subscriber_{$id}")) {
+                return $this->notice(__('Security check failed.', 'edh-newsletter'), 'error');
+            }
+            
+            $result = $this->apply_subscriber_action($subscriber_manager, $action, $id);
+            
+            return $result['success']
+                ? $this->notice($this->action_success_message($action, 1), 'success')
+                : $this->notice($result['error'] ?? __('The action failed.', 'edh-newsletter'), 'error');
+        }
+        
+        // Bulk actions (POST)
+        if (isset($_POST['newsletter_bulk_nonce'])) {
+            if (!wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['newsletter_bulk_nonce'])), 'newsletter_bulk_action')) {
+                return $this->notice(__('Security check failed.', 'edh-newsletter'), 'error');
+            }
+            
+            $action = sanitize_key($_POST['bulk_action'] ?? '');
+            $ids = array_filter(array_map('absint', (array) ($_POST['subscribers'] ?? [])));
+            
+            if (!in_array($action, ['delete', 'unsubscribe', 'resubscribe'], true) || empty($ids)) {
+                return $this->notice(__('Select an action and at least one subscriber.', 'edh-newsletter'), 'error');
+            }
+            
+            $done = 0;
+            foreach ($ids as $id) {
+                if ($this->apply_subscriber_action($subscriber_manager, $action, $id)['success']) {
+                    $done++;
+                }
+            }
+            
+            return $this->notice($this->action_success_message($action, $done), $done > 0 ? 'success' : 'error');
+        }
+        
+        // Add subscriber (POST)
+        if (isset($_POST['newsletter_add_subscriber_nonce'])) {
+            if (!wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['newsletter_add_subscriber_nonce'])), 'newsletter_add_subscriber')) {
+                return $this->notice(__('Security check failed.', 'edh-newsletter'), 'error');
+            }
+            
+            return $this->add_subscriber($subscriber_manager);
+        }
+        
+        return '';
+    }
+    
+    /**
+     * Apply one action to one subscriber
+     */
+    private function apply_subscriber_action(EDH_Newsletter_Subscriber_Manager $subscriber_manager, string $action, int $id): array {
+        switch ($action) {
+            case 'delete':
+                return $subscriber_manager->delete_subscriber($id);
+            case 'unsubscribe':
+                return $subscriber_manager->unsubscribe($id, 'Admin action');
+            case 'resubscribe':
+                return $subscriber_manager->resubscribe($id);
+        }
+        
+        return ['success' => false, 'error' => __('Unknown action.', 'edh-newsletter')];
+    }
+    
+    /**
+     * Success message for a subscriber action
+     */
+    private function action_success_message(string $action, int $count): string {
+        switch ($action) {
+            case 'delete':
+                // translators: %d: number of subscribers
+                return sprintf(_n('%d subscriber deleted.', '%d subscribers deleted.', $count, 'edh-newsletter'), $count);
+            case 'unsubscribe':
+                // translators: %d: number of subscribers
+                return sprintf(_n('%d subscriber unsubscribed.', '%d subscribers unsubscribed.', $count, 'edh-newsletter'), $count);
+            case 'resubscribe':
+                // translators: %d: number of subscribers
+                return sprintf(_n('%d subscriber resubscribed.', '%d subscribers resubscribed.', $count, 'edh-newsletter'), $count);
+        }
+        
+        return '';
+    }
+    
+    /**
+     * Handle the "Add New Subscriber" form
+     */
+    private function add_subscriber(EDH_Newsletter_Subscriber_Manager $subscriber_manager): string {
+        // phpcs:disable WordPress.Security.NonceVerification.Missing -- newsletter_add_subscriber nonce is verified by handle_subscriber_actions() before this is called
+        $email = isset($_POST['email']) ? sanitize_email(wp_unslash($_POST['email'])) : '';
+        $frequency = sanitize_key($_POST['digest_frequency'] ?? 'weekly');
+        $status = sanitize_key($_POST['status'] ?? 'pending') === 'subscribed' ? 'subscribed' : 'pending';
+        // phpcs:enable WordPress.Security.NonceVerification.Missing
+        
+        if (!is_email($email)) {
+            return $this->notice(__('Please enter a valid email address.', 'edh-newsletter'), 'error');
+        }
+        
+        $privacy_manager = EDH_Newsletter_Core::get_instance()->get_module('privacy_manager');
+        if ($privacy_manager) {
+            $privacy_errors = $privacy_manager->validate_email_privacy($email);
+            if (!empty($privacy_errors)) {
+                return $this->notice(implode(' ', $privacy_errors), 'error');
+            }
+        }
+        
+        $result = $subscriber_manager->create_subscriber([
+            'email' => $email,
+            'digest_frequency' => $frequency,
+            'status' => $status,
+        ]);
+        
+        if (!$result['success']) {
+            return $this->notice($result['error'], 'error');
+        }
+        
+        if ($status === 'pending') {
+            $email_sender = EDH_Newsletter_Core::get_instance()->get_module('email_sender');
+            $sent = $email_sender ? $email_sender->send_confirmation_email($result['data']) : false;
+            
+            return $sent
+                ? $this->notice(__('Subscriber added. A confirmation email has been sent.', 'edh-newsletter'), 'success')
+                : $this->notice(__('Subscriber added, but the confirmation email could not be sent.', 'edh-newsletter'), 'warning');
+        }
+        
+        return $this->notice(__('Subscriber added and marked as subscribed.', 'edh-newsletter'), 'success');
+    }
+    
+    /**
+     * Stream a CSV of subscribers when the export form is submitted (runs on admin_init)
+     */
+    public function maybe_export_subscribers(): void {
+        // phpcs:ignore WordPress.Security.NonceVerification.Missing -- presence check only; the nonce is verified below
+        if (!isset($_POST['export_subscribers'], $_POST['newsletter_export_nonce'])) {
+            return;
+        }
+        
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        
+        if (!wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['newsletter_export_nonce'])), 'newsletter_export_subscribers')) {
+            wp_die(esc_html__('Security check failed.', 'edh-newsletter'));
+        }
+        
+        $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
+        if (!$subscriber_manager) {
+            wp_die(esc_html__('Subscriber manager not available', 'edh-newsletter'));
+        }
+        
+        $statuses = array_map('sanitize_key', (array) wp_unslash($_POST['export_status'] ?? [])); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- each value is passed through sanitize_key and then whitelisted
+        $statuses = array_values(array_intersect($statuses, EDH_Newsletter_Subscriber_Manager::VALID_STATUSES));
+        
+        if (empty($statuses)) {
+            $statuses = ['subscribed'];
+        }
+        
+        nocache_headers();
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="newsletter-subscribers-' . gmdate('Y-m-d') . '.csv"');
+        
+        // phpcs:disable WordPress.Security.EscapeOutput.OutputNotEscaped -- CSV body, not HTML; every cell is quoted by csv_row()
+        echo $this->csv_row(['id', 'email', 'status', 'digest_frequency', 'created_at', 'privacy_consent_date', 'consent_version', 'last_engagement_date']);
+        
+        $after_id = 0;
+        do {
+            $rows = $subscriber_manager->get_subscribers([
+                'status' => $statuses,
+                'after_id' => $after_id,
+                'orderby' => 'id',
+                'order' => 'ASC',
+                'limit' => 500,
+            ]);
+            
+            foreach ($rows as $row) {
+                $after_id = $row['id'];
+                echo $this->csv_row([
+                    $row['id'],
+                    $row['email'],
+                    $row['status'],
+                    $row['digest_frequency'],
+                    $row['created_at'],
+                    $row['privacy_consent_date'],
+                    $row['consent_version'],
+                    $row['last_engagement_date'],
+                ]);
+            }
+        } while (count($rows) === 500);
+        // phpcs:enable WordPress.Security.EscapeOutput.OutputNotEscaped
+        
+        exit;
+    }
+    
+    /**
+     * Format one CSV record (RFC 4180 quoting, CRLF line ending)
+     */
+    private function csv_row(array $fields): string {
+        $cells = [];
+        foreach ($fields as $value) {
+            $cells[] = '"' . str_replace('"', '""', $this->csv_safe($value)) . '"';
+        }
+        
+        return implode(',', $cells) . "\r\n";
+    }
+    
+    /**
+     * Neutralise spreadsheet formula injection in a CSV cell
+     */
+    private function csv_safe($value): string {
+        $value = (string) $value;
+        
+        return preg_match('/^[=+\-@\t\r]/', $value) ? "'" . $value : $value;
+    }
+    
+    /**
+     * Build an admin notice
+     */
+    private function notice(string $message, string $type = 'info'): string {
+        return '<div class="notice notice-' . esc_attr($type) . ' is-dismissible"><p>' . esc_html($message) . '</p></div>';
     }
     
     /**
@@ -292,7 +536,7 @@ class EDH_Newsletter_Admin_Interface {
             wp_die(esc_html__('Insufficient permissions', 'edh-newsletter'));
         }
         
-        $email = sanitize_email($_POST['email'] ?? '');
+        $email = isset($_POST['email']) ? sanitize_email(wp_unslash($_POST['email'])) : '';
         $frequency = sanitize_key($_POST['frequency'] ?? 'weekly');
         
         if (!is_email($email)) {
@@ -347,12 +591,31 @@ class EDH_Newsletter_Admin_Interface {
     }
     
     /**
+     * Handle "Run Cleanup Now" AJAX request
+     */
+    public function handle_run_cleanup(): void {
+        check_ajax_referer('newsletter_admin_nonce', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(__('Insufficient permissions', 'edh-newsletter'));
+        }
+        
+        $scheduler = EDH_Newsletter_Core::get_instance()->get_module('digest_scheduler');
+        
+        if (!$scheduler || !$scheduler->trigger_cleanup()) {
+            wp_send_json_error(__('Cleanup could not be started', 'edh-newsletter'));
+        }
+        
+        wp_send_json_success(__('Cleanup completed.', 'edh-newsletter'));
+    }
+    
+    /**
      * Show admin notices
      */
     public function show_admin_notices(): void {
         $screen = get_current_screen();
         
-        if (!$screen || strpos($screen->id, 'edh-newsletter') === false) {
+        if (!$screen || !$this->is_plugin_page($screen->id)) {
             return;
         }
         
@@ -388,36 +651,42 @@ class EDH_Newsletter_Admin_Interface {
      * Get subscriber status counts for filters
      */
     public function get_status_counts(): array {
-        $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
-        
-        if (!$subscriber_manager) {
-            return [];
-        }
+        $counts = $this->get_grouped_counts();
         
         return [
-            'all' => $subscriber_manager->get_subscriber_count([]),
-            'subscribed' => $subscriber_manager->get_subscriber_count(['status' => 'subscribed']),
-            'pending' => $subscriber_manager->get_subscriber_count(['status' => 'pending']),
-            'unsubscribed' => $subscriber_manager->get_subscriber_count(['status' => 'unsubscribed']),
-            'paused' => $subscriber_manager->get_subscriber_count(['status' => 'paused']),
+            'all' => array_sum(array_map('array_sum', $counts)),
+            'subscribed' => array_sum($counts['subscribed'] ?? []),
+            'pending' => array_sum($counts['pending'] ?? []),
+            'unsubscribed' => array_sum($counts['unsubscribed'] ?? []),
+            'paused' => array_sum($counts['paused'] ?? []),
         ];
     }
     
     /**
-     * Get frequency counts for filters
+     * Get frequency counts (subscribed only) for filters
      */
     public function get_frequency_counts(): array {
-        $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
-        
-        if (!$subscriber_manager) {
-            return [];
-        }
+        $counts = $this->get_grouped_counts();
         
         return [
-            'all' => $subscriber_manager->get_subscriber_count(['status' => 'subscribed']),
-            'weekly' => $subscriber_manager->get_subscriber_count(['status' => 'subscribed', 'frequency' => 'weekly']),
-            'monthly' => $subscriber_manager->get_subscriber_count(['status' => 'subscribed', 'frequency' => 'monthly']),
+            'all' => array_sum($counts['subscribed'] ?? []),
+            'weekly' => $counts['subscribed']['weekly'] ?? 0,
+            'monthly' => $counts['subscribed']['monthly'] ?? 0,
         ];
+    }
+    
+    /**
+     * Grouped counts, fetched once per request
+     */
+    private function get_grouped_counts(): array {
+        static $counts = null;
+        
+        if ($counts === null) {
+            $subscriber_manager = EDH_Newsletter_Core::get_instance()->get_module('subscriber_manager');
+            $counts = $subscriber_manager ? $subscriber_manager->get_status_frequency_counts() : [];
+        }
+        
+        return $counts;
     }
     
     /**

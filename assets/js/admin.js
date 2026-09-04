@@ -15,6 +15,7 @@
         initDigestTriggers();
         initSubscriberActions();
         initSettingsTabs();
+        initCleanupTrigger();
     });
     
     /**
@@ -122,7 +123,7 @@
         });
         
         $('.newsletter-bulk-actions').on('submit', function(e) {
-            var action = $(this).find('select[name="action"]').val();
+            var action = $(this).find('select[name="bulk_action"]').val();
             var selected = $(this).find('input[name="subscribers[]"]:checked').length;
             
             if (!action || action === '-1') {
@@ -145,6 +146,42 @@
         // Select all checkbox
         $('#newsletter-select-all').on('change', function() {
             $('input[name="subscribers[]"]').prop('checked', this.checked);
+        });
+    }
+    
+    /**
+     * Initialize the privacy page "Run Cleanup Now" button
+     */
+    function initCleanupTrigger() {
+        $('.newsletter-trigger-cleanup').on('click', function(e) {
+            e.preventDefault();
+            
+            var $button = $(this);
+            var originalText = $button.text();
+            
+            $button.prop('disabled', true).text('Running...');
+            
+            $.ajax({
+                url: newsletter_admin.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'newsletter_run_cleanup',
+                    nonce: newsletter_admin.nonce
+                },
+                success: function(response) {
+                    if (response.success) {
+                        showNotice(response.data || newsletter_admin.strings.cleanup_done, 'success');
+                    } else {
+                        showNotice(response.data || newsletter_admin.strings.error_occurred, 'error');
+                    }
+                },
+                error: function() {
+                    showNotice(newsletter_admin.strings.error_occurred, 'error');
+                },
+                complete: function() {
+                    $button.prop('disabled', false).text(originalText);
+                }
+            });
         });
     }
     
@@ -209,10 +246,12 @@
     }
     
     /**
-     * Initialize media uploader for logo
+     * Native media picker for the logo field
      */
     function initMediaUploader() {
-        var mediaUploader;
+        if (!wp.media) {
+            return;
+        }
         
         $('.newsletter-upload-logo').on('click', function(e) {
             e.preventDefault();
@@ -221,52 +260,37 @@
             var $input = $button.siblings('input[type="url"]');
             var $preview = $button.siblings('.newsletter-logo-preview');
             
-            // If the media uploader already exists, reopen it
-            if (mediaUploader) {
-                mediaUploader.open();
-                return;
-            }
-            
-            // Create the media uploader
-            mediaUploader = wp.media({
-                title: 'Choose Logo',
-                button: {
-                    text: 'Use This Image'
-                },
+            // A fresh frame per click keeps the field references correct
+            var frame = wp.media({
+                title: newsletter_admin.strings.choose_logo,
+                button: { text: newsletter_admin.strings.use_image },
                 multiple: false,
-                library: {
-                    type: 'image'
-                }
+                library: { type: 'image' }
             });
             
-            // When an image is selected
-            mediaUploader.on('select', function() {
-                var attachment = mediaUploader.state().get('selection').first().toJSON();
-                $input.val(attachment.url);
-                $preview.html('<img src="' + attachment.url + '" style="max-width: 200px; max-height: 100px;">');
+            frame.on('select', function() {
+                var attachment = frame.state().get('selection').first().toJSON();
+                var url = attachment.url;
+                
+                $input.val(url).trigger('change');
+                $preview.empty().append(
+                    $('<img>', { src: url, alt: '' }).css({ maxWidth: '200px', maxHeight: '100px' })
+                );
             });
             
-            // Open the uploader
-            mediaUploader.open();
+            frame.open();
         });
         
-        // Remove logo
         $('.newsletter-remove-logo').on('click', function(e) {
             e.preventDefault();
             
             var $button = $(this);
-            var $input = $button.siblings('input[type="url"]');
-            var $preview = $button.siblings('.newsletter-logo-preview');
-            
-            $input.val('');
-            $preview.empty();
+            $button.siblings('input[type="url"]').val('').trigger('change');
+            $button.siblings('.newsletter-logo-preview').empty();
         });
     }
     
-    // Initialize media uploader if wp.media is available
-    if (typeof wp !== 'undefined' && wp.media) {
-        initMediaUploader();
-    }
+    initMediaUploader();
     
     /**
      * Real-time settings preview

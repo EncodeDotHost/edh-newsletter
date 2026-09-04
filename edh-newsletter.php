@@ -2,14 +2,14 @@
 /**
  * Plugin Name: EDH Newsletter - Weekly & Monthly Digest
  * Description: Advanced newsletter plugin with double opt-in, GDPR compliance, customizable templates, and support for weekly and monthly digests.
- * Version: 2.0.0
+ * Version: 2.1.0
  * Author: EncodeDotHost
  * License: GPL2
  * Text Domain: edh-newsletter
  * Domain Path: /languages
- * Requires at least: 5.0
- * Tested up to: 6.8
- * Requires PHP: 7.4
+ * Requires at least: 6.3
+ * Tested up to: 7.1
+ * Requires PHP: 8.0
  */
 
 declare(strict_types=1);
@@ -71,18 +71,6 @@ function edh_newsletter_legacy_subscription_form_shortcode($atts) {
     return '';
 }
 add_shortcode('weekly_digest_signup', 'edh_newsletter_legacy_subscription_form_shortcode');
-
-/**
- * Legacy action handlers for backward compatibility
- * These redirect old public actions to the new system
- */
-function edh_newsletter_legacy_handle_public_actions() {
-    $frontend_forms = EDH_Newsletter_Core::get_instance()->get_module('frontend_forms');
-    if ($frontend_forms) {
-        // The new system handles this in its own init hook
-        return;
-    }
-}
 
 /**
  * Legacy cron handlers

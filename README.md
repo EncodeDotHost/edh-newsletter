@@ -1,12 +1,12 @@
 === EDH Newsletter - Weekly & Monthly Digest ===
 Contributors: EncodeDotHost
 Tags: newsletter, email, digest, subscription, mailing-list
-Requires at least: 5.0
-Tested up to: 6.8
-Stable tag: 2.0.0
+Requires at least: 6.3
+Tested up to: 7.1
+Stable tag: 2.1.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
-Requires PHP: 7.4
+Requires PHP: 8.0
 
 A comprehensive WordPress newsletter plugin with GDPR compliance, multi-frequency support, and advanced template customization.
 
@@ -31,6 +31,12 @@ A comprehensive WordPress newsletter plugin with GDPR compliance, multi-frequenc
 - Theme template overrides
 - Multiple template types (digest, confirmation, welcome)
 
+### 🛡️ **Spam Protection**
+- Honeypot field and minimum fill time on every public form
+- Per-address and per-IP submission throttling
+- Suppression list (addresses or whole domains) and disposable-domain blocking
+- Optional Cloudflare Turnstile challenge
+
 ### 🎛️ **Modern Admin Interface**
 - Comprehensive dashboard with analytics
 - Advanced subscriber management
@@ -51,6 +57,15 @@ A comprehensive WordPress newsletter plugin with GDPR compliance, multi-frequenc
 2. Activate the plugin through the WordPress admin
 3. Configure settings in **Newsletter > Settings**
 4. Add signup forms using shortcodes or widgets
+
+## Blocks
+
+Both forms are available as native blocks in the block editor (search for "Newsletter"):
+
+- **Newsletter Signup** — the signup form, with title, description, button text, frequency chooser, default frequency and style settings in the sidebar.
+- **Newsletter Preferences** — the preferences lookup form.
+
+The blocks are server-rendered and produce exactly the same markup as the shortcodes below, so existing styling applies to both.
 
 ## Shortcodes
 
@@ -105,8 +120,8 @@ The plugin automatically migrates from version 1.x:
 
 ## System Requirements
 
-- WordPress 5.0 or higher
-- PHP 7.4 or higher
+- WordPress 6.3 or higher
+- PHP 8.0 or higher
 - MySQL 5.6 or higher
 
 ## Support
@@ -114,6 +129,14 @@ The plugin automatically migrates from version 1.x:
 For support and documentation, visit the plugin settings page in your WordPress admin.
 
 ## Changelog
+
+### Version 2.1.0
+- Native block editor blocks for the signup and preferences forms
+- Spam protection: honeypot, timing check, throttling, suppression list, optional Turnstile
+- Digest sending is batched and rendered once per run
+- Scheduler computes send times in the site timezone
+- Security and correctness fixes (see CODE_REVIEW.md)
+- Requires WordPress 6.3 and PHP 8.0
 
 ### Version 2.0.0
 - Complete rewrite with modular architecture

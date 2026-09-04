@@ -1,0 +1,26 @@
+{
+    "$schema": "https://schemas.wp.org/trunk/block.json",
+    "apiVersion": 3,
+    "name": "edh-newsletter/signup-form",
+    "title": "Newsletter Signup",
+    "category": "widgets",
+    "icon": "email-alt",
+    "description": "Newsletter signup form with double opt-in. Same output as the [newsletter_signup] shortcode.",
+    "keywords": ["newsletter", "subscribe", "email", "signup"],
+    "textdomain": "edh-newsletter",
+    "supports": {
+        "html": false,
+        "align": ["wide", "full"],
+        "spacing": { "margin": true }
+    },
+    "attributes": {
+        "title": { "type": "string", "default": "Subscribe to Our Newsletter" },
+        "description": { "type": "string", "default": "Get the latest updates delivered to your inbox." },
+        "buttonText": { "type": "string", "default": "Subscribe" },
+        "showFrequency": { "type": "boolean", "default": true },
+        "defaultFrequency": { "type": "string", "enum": ["weekly", "monthly"], "default": "weekly" },
+        "style": { "type": "string", "enum": ["default", "minimal", "boxed", "inline"], "default": "default" }
+    },
+    "editorScript": "edh-newsletter-blocks",
+    "editorStyle": "edh-newsletter-block-preview"
+}

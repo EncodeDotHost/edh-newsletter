@@ -225,6 +225,20 @@
     text-align: center;
 }
 
+/* Anti-spam honeypot: off-screen for people, present for bots */
+.newsletter-hp {
+    position: absolute !important;
+    left: -10000px !important;
+    top: auto;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+}
+
+.newsletter-turnstile {
+    min-height: 65px;
+}
+
 /* Style variations */
 .newsletter-style-minimal {
     border: none;
@@ -241,22 +255,60 @@
     background: #f0f8ff;
 }
 
+/* Inline: email, frequency and button on one row; consent on its own row below */
+.newsletter-style-inline {
+    max-width: 720px;
+}
+
 .newsletter-style-inline .newsletter-form {
     flex-direction: row;
-    align-items: end;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 10px;
 }
 
 .newsletter-style-inline .newsletter-field {
-    flex: 1;
+    flex: 1 1 140px;
+    min-width: 0;
 }
 
-.newsletter-style-inline .newsletter-field:last-child {
+.newsletter-style-inline .newsletter-field:first-child {
+    flex: 2 1 200px;
+}
+
+/* The frequency question is too long for a row; keep it for screen readers only */
+.newsletter-style-inline .newsletter-field:not(.newsletter-consent) > label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.newsletter-style-inline .newsletter-field input[type="email"],
+.newsletter-style-inline .newsletter-field select {
+    height: 100%;
+}
+
+.newsletter-style-inline .newsletter-consent {
+    flex: 1 1 100%;
+    order: 10;
+    margin: 0;
+}
+
+.newsletter-style-inline .newsletter-field:has(button) {
     flex: 0 0 auto;
 }
 
 .newsletter-style-inline .newsletter-field button {
     width: auto;
+    height: 100%;
     padding: 10px 20px;
+    white-space: nowrap;
 }
 
 /* Responsive design */

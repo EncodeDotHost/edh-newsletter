@@ -20,12 +20,12 @@ class EDH_Newsletter_Core {
     /**
      * Plugin version
      */
-    const VERSION = '2.0.0';
+    const VERSION = '2.1.0';
     
     /**
      * Database version
      */
-    const DB_VERSION = '2.0';
+    const DB_VERSION = '2.1';
     
     /**
      * Plugin instance
@@ -95,11 +95,12 @@ class EDH_Newsletter_Core {
      * Initialize WordPress hooks
      */
     private function init_hooks() {
-        register_activation_hook($this->plugin_file, [$this, 'activate']);
-        register_deactivation_hook($this->plugin_file, [$this, 'deactivate']);
-        
-        add_action('plugins_loaded', [$this, 'init_plugin']);
-        add_action('init', [$this, 'init_modules']);
+        // Activation/deactivation hooks are registered in the bootstrap file.
+        // This object is constructed during plugins_loaded, so anything hooked
+        // here must use a later hook: WP_Hook does not run callbacks added to
+        // the priority that is currently executing.
+        add_action('init', [$this, 'init_plugin'], 5);
+        add_action('init', [$this, 'init_modules'], 10);
     }
     
     /**
@@ -112,6 +113,8 @@ class EDH_Newsletter_Core {
             'template-manager',
             'privacy-manager',
             'digest-scheduler',
+            'spam-guard',
+            'blocks',
         ];
         
         foreach ($modules as $module) {
@@ -126,10 +129,9 @@ class EDH_Newsletter_Core {
             require_once EDH_NEWSLETTER_ADMIN_DIR . 'class-admin-interface.php';
         }
         
-        // Load public modules
-        if (!is_admin()) {
-            require_once EDH_NEWSLETTER_PUBLIC_DIR . 'class-frontend-forms.php';
-        }
+        // Frontend forms are loaded in every context: the block editor and REST
+        // block previews render them, and their hooks self-gate on request type.
+        require_once EDH_NEWSLETTER_PUBLIC_DIR . 'class-frontend-forms.php';
     }
     
     /**
@@ -154,15 +156,15 @@ class EDH_Newsletter_Core {
         $this->modules['template_manager'] = new EDH_Newsletter_Template_Manager();
         $this->modules['privacy_manager'] = new EDH_Newsletter_Privacy_Manager();
         $this->modules['digest_scheduler'] = new EDH_Newsletter_Digest_Scheduler();
+        $this->modules['spam_guard'] = new EDH_Newsletter_Spam_Guard();
+        $this->modules['frontend_forms'] = new EDH_Newsletter_Frontend_Forms();
+        
+        // Blocks delegate rendering to frontend_forms, so they come after it
+        $this->modules['blocks'] = new EDH_Newsletter_Blocks();
         
         // Initialize admin interface
         if (is_admin()) {
             $this->modules['admin_interface'] = new EDH_Newsletter_Admin_Interface();
-        }
-        
-        // Initialize frontend forms
-        if (!is_admin()) {
-            $this->modules['frontend_forms'] = new EDH_Newsletter_Frontend_Forms();
         }
         
         // Allow other plugins to hook into our modules
@@ -180,6 +182,10 @@ class EDH_Newsletter_Core {
      * Plugin activation
      */
     public function activate() {
+        // Run pending migrations first: create_tables() stamps the DB version,
+        // which would otherwise skip the v1.x -> v2 migration.
+        $this->maybe_upgrade_database();
+        
         // Create/update database tables
         $this->create_tables();
         
@@ -200,10 +206,12 @@ class EDH_Newsletter_Core {
      * Plugin deactivation
      */
     public function deactivate() {
-        // Clear scheduled events
-        wp_clear_scheduled_hook('edh_newsletter_send_weekly_digest');
-        wp_clear_scheduled_hook('edh_newsletter_send_monthly_digest');
-        wp_clear_scheduled_hook('edh_newsletter_cleanup_expired_data');
+        // Clear scheduled events, including batch events with arguments and the legacy v1.x hook
+        wp_unschedule_hook('edh_newsletter_send_weekly_digest');
+        wp_unschedule_hook('edh_newsletter_send_monthly_digest');
+        wp_unschedule_hook('edh_newsletter_send_digest_batch');
+        wp_unschedule_hook('edh_newsletter_cleanup_expired_data');
+        wp_unschedule_hook('wan_send_weekly_digest');
         
         // Flush rewrite rules
         flush_rewrite_rules();
@@ -233,6 +241,7 @@ class EDH_Newsletter_Core {
             updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL,
             PRIMARY KEY (id),
             UNIQUE KEY email (email),
+            KEY token (token),
             KEY status (status),
             KEY digest_frequency (digest_frequency),
             KEY created_at (created_at)
@@ -261,6 +270,11 @@ class EDH_Newsletter_Core {
         add_option('newsletter_privacy_policy_url', '');
         add_option('newsletter_data_retention_days', 365);
         add_option('newsletter_consent_version', '1.0');
+        
+        // Spam protection
+        add_option('newsletter_spam_min_seconds', 3);
+        add_option('newsletter_spam_max_per_hour', 10);
+        add_option('newsletter_block_disposable_emails', 1);
         
         // Template settings
         add_option('newsletter_brand_color', '#1e73be');
@@ -293,18 +307,23 @@ class EDH_Newsletter_Core {
             $new_table = $wpdb->prefix . 'newsletter_subscribers';
             
             // Check if old table exists using prepared statement
+            // phpcs:disable WordPress.DB.DirectDatabaseQuery -- one-off schema check during upgrade
             $table_exists = $wpdb->get_var($wpdb->prepare(
                 "SHOW TABLES LIKE %s",
                 $old_table
             ));
+            // phpcs:enable WordPress.DB.DirectDatabaseQuery
             if ($table_exists === $old_table) {
                 // Migrate data from old table to new table
                 $this->migrate_from_legacy_table($old_table, $new_table);
             }
+            
+            // The v1.x cron event is no longer needed; v2 schedules its own.
+            wp_unschedule_hook('wan_send_weekly_digest');
         }
         
-        // Update version
-        update_option('newsletter_db_version', self::DB_VERSION);
+        // Apply any schema changes (dbDelta is idempotent) and stamp the version
+        $this->create_tables();
     }
     
     /**
@@ -316,10 +335,9 @@ class EDH_Newsletter_Core {
         // First create the new table
         $this->create_tables();
         
-        // Migrate existing subscribers
-        // Table name is safe here as it's from our own prefix, but we'll escape it for safety
+        // Migrate existing subscribers (one-off during upgrade; table name is esc_sql()'d)
+        // phpcs:disable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         $old_table_escaped = esc_sql($old_table);
-        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table name cannot be parameterized in prepared statements
         $subscribers = $wpdb->get_results("SELECT * FROM `{$old_table_escaped}`");
         
         foreach ($subscribers as $subscriber) {
@@ -338,6 +356,7 @@ class EDH_Newsletter_Core {
                 ['%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s']
             );
         }
+        // phpcs:enable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         
         // Migrate old settings to new format
         $old_settings = [
@@ -348,7 +367,7 @@ class EDH_Newsletter_Core {
         foreach ($old_settings as $old_key => $new_key) {
             $value = get_option($old_key);
             if ($value !== false) {
-                update_option($new_key, $value);
+                update_option($new_key, (int) $value);
             }
         }
     }
